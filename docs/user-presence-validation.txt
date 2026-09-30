@@ -1,0 +1,137 @@
+起動時 user presence の引き継ぎ修正・検証記録
+作業日: 2026-10-01 JST
+
+対象と環境
+==========
+元の手順書: /home/reina/WIVRN_USER_PRESENCE_HANDOFF.txt
+適用先は /home/reina/WiVRn のみ。作業開始時 master、未変更。
+基準 HEAD: 3e73d98ae22cfdc2cdd6a3a0db7e41a958bba936
+
+この環境の関連ソースを読み、版を確認した:
+  /home/reina/xrizer
+    635cbd8851af3976dae73afa21280136c8b8633c
+    Fix initial proximity updates and device-restricted queries
+  /home/reina/monado
+    045931d12f1cc9afde942f7905db08e6f51b9d8e
+    clang-tidy: enable clang-analyzer-deadcode.DeadStores
+両ツリーは未変更で、この作業でも変更していない。
+WiVRn が指定する monado-rev は 09741cbcb45236f4f4f79790ea133cd90d68d5eb。
+ローカル Monado HEAD と一致しないため、同じ配備版として扱わない。
+実機 PC runtime、稼働中サーバー、インストール済み APK の版は未確認。
+WayVR のソース・実行環境は今回の workspace にない。
+
+確定したコード上の問題と修正
+============================
+1. application は lobby で取得した presence を保存していなかった。
+   application が xr::user_presence を所有し、最後の実イベントの bool を
+   optional で保持する。未知と既知 false を区別する。
+   成功した xrBeginSession 後に、その session handle と capability を登録する。
+   extension 非対応または supportsUserPresence=false では保存・送信しない。
+   他の session の presence event は scene にも転送しない。
+   セッション作成前、正常終了後、再開始、loss/exit、cleanup で古い値を消す。
+   VISIBLE/FOCUSED やコントローラー入力から値を推定しない。
+
+2. stream::create() は presence snapshot を送っていなかった。
+   headset_info と session state の送信後、最新値が既知なら既存 control packet
+   user_presence_changed を送る。false も送る。未知の場合は送らない。
+   後続イベントと snapshot は同じ send_user_presence() を使う。
+   時刻は既存の instance.now()、受信側は既存 offset_est の変換を使う。
+   snapshot は送信時刻を持つ現在値であり、過去イベントの発生時刻ではない。
+
+   application::loop() の poll_events() と lobby::render() 内の stream::create()
+   は同じ application thread。async 接続処理は stream を作らない。
+   create 中にイベント polling が割り込まないので、古い snapshot が新しい
+   presence event の後に送られる経路は追加していない。
+   create 後は既存 lobby::next_scene->on_xr_event() が後続イベントを転送する。
+   scene activation 時の余分な再送・lock・protocol 変更は不要。
+   切断すると stream は shutdown となり、lobby_gui が next_scene を解除する。
+   再接続は stream 再作成を通り、同じ状態のままでも snapshot を再送する。
+
+3. server start() は net_thread 起動後に resume_session() を呼び、最後に
+   presence を false へ戻していた。受信済みの初期値を上書きする競合が可能。
+   mnd_ipc_server 設定 → resume_session() 完了 → net_thread 起動に変更した。
+   resume は音声・encoder 再開、descriptor/application list 送信、worker 起動、
+   client states と presence 初期化を行う。packet の受信完了を待つ処理はない。
+   client は snapshot 送信後に独立した network thread を開始して受信する。
+   worker は時計同期要求等を送るが、presence packet を処理しない。
+   初期化例外時には net_thread はまだ起動せず、通常の session 破棄が worker
+   を停止する。再接続は既存どおり run_net() 自身が reset/handshake、resume、
+   次の poll の順で実行する。handshake は headset_info まで受信するので、
+   その後に送られる snapshot は resume 後に処理される。
+
+   サーバーの既存の初期 false、および切断時 false の扱いは維持した。
+   センサー非対応機器で HEAD_DETECT を公開する条件も変更していない。
+   実際に競合が発生した実機ログはなく、VRChat 症状の解決は未確認。
+
+参照した仕様
+============
+https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrEventDataUserPresenceChangedEXT.html
+xrBeginSession 成功時に true/false どちらも初期イベントが queue される。
+session state と presence の相関から値を推定する仕様ではない。
+
+自動検証
+========
+GCC 16.2.1。OpenXR ヘッダーはこの環境の Monado 同梱版を使用した。
+実際に使用する xr::user_presence を直接テストし、XR runtime/linker は不要。
+
+  g++ -std=c++23 -Wall -Wextra -Werror -Iclient \
+    -I/home/reina/monado/src/external/openxr_includes \
+    client/tests/user_presence.cpp -o /tmp/wivrn-user-presence-test
+  /tmp/wivrn-user-presence-test
+
+成功: 初期 true/false、イベント前の未知、複数変化後の最新値、値を読み出した
+後も状態を保持すること、後続イベント、別 session の拒否、終了/同じ session
+再開始/別 session 再作成での reset、非対応 capability。
+このテストはネットワーク転送・scene 転送・サーバースレッドを実行しない。
+それらは上記のコードレビューと、下記の実機検証で確認する。
+大きな Vulkan/application/Monado mock は今回追加していない。
+
+既存 WIVRN_BUILD_TEST に Linux client 用の user-presence-test と CTest 登録を
+追加した。通常のビルド環境では以下で実行可能だが、この環境では未実行:
+  cmake --preset client -DWIVRN_BUILD_TEST=ON
+  cmake --build build-client --target user-presence-test
+  ctest --test-dir build-client -R '^user-presence$' --output-on-failure
+
+試行したビルド・format:
+  cmake --preset server
+    失敗: cmake: command not found。server の compile/build 未実行。
+  ./gradlew --gradle-user-home /tmp/wivrn-gradle assembleRelease
+    失敗: JAVA_HOME 未設定、java もない。APK の compile/build 未実行。
+  clang-format --version
+    失敗: clang-format: command not found。CI 指定の clang-format 21 未実行。
+  git diff --check
+    成功。
+この環境には Ninja、Java、Android SDK/NDK、adb も見つからない。
+PC サーバー・APK 成果物は生成していない。テスト実行ファイルだけを /tmp に作成。
+環境を整えた後、server preset と docs/building.md / build.gradle の手順で
+PC と APK を両方ビルドし、変更した C++ ファイルを clang-format 21 で確認する。
+
+関連ソースから分かること
+========================
+ローカル Monado oxr_session.c は begin 時に HEAD_DETECT を update_inputs()
+で更新し、初期 presence event を queue する。poll 時にも値の変化を通知する。
+ipc_server_handler.c は block_inputs の対象に boolean input を含むため、
+client に送る HEAD_DETECT が false になる可能性がある。
+この挙動は WiVRn の保持値/packet と別の段階であり、今回変更していない。
+xrizer src/input.rs は初めての既知値を changed とする修正を既に含んでいる。
+手順書の一時的な tracing や workaround を復活させていない。
+
+残る実機検証
+============
+1. 修正済み PC サーバーと APK を両方ビルドし、commit/build ID を記録する。
+   APK インストール・使用中サーバーの切り替えは、具体的な成果物を示して
+   ユーザーの実機での実行許可を得てから行う。
+2. WayVR 停止/blocking 無効で、装着したまま lobby に入り接続する。
+   取り外す前に packet → HMD 保持値 → HEAD_DETECT → PC OpenXR event の
+   初期 true を確認する。確認目的で先に着脱を挟まない。
+3. VRChat の Home/ワールド・通常アバター表示を待ち、最初の取り外し時刻を
+   記録する。false が届くことと AFK の変化を別々に確認する。
+4. 付け直し/次の取り外し、未装着開始、接続前の複数回着脱、状態を変えない
+   再接続も確認する。extension 非対応機器で通常入力が変わらないか確認する。
+5. 初回 packet を早く送る条件でも、resume 後の HMD 値が snapshot と一致する
+   ことを確認する。snapshot がイベント polling より先なら、後から届く初期
+   イベントで更新されることも確認する。
+6. 必要なら blocking 有効で別に試す。WiVRn packet/HMD と client ごとの
+   Monado input/presence を区別する。時計は既存 offset/操作時刻で対応させる。
+
+実機操作、配備版の特定、AFK/WayVR 症状の再現・解消確認は未実施。

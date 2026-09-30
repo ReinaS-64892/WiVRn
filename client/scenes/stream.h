@@ -57,6 +57,8 @@ public:
 	app_launcher apps;
 
 private:
+	void send_user_presence();
+
 	static const size_t view_count = 2;
 	static const size_t decoder_count = view_count + 1;
 

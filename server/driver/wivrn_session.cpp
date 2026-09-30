@@ -369,8 +369,10 @@ void wivrn_session::start(ipc_server * server)
 {
 	assert(not net_thread.joinable());
 	mnd_ipc_server = server;
-	net_thread = std::jthread([this](auto stop_token) { return run_net(stop_token); });
+	// Finish initialization before accepting the initial presence and session state.
+	// Reconnect already resumes on the network thread before polling new packets.
 	resume_session();
+	net_thread = std::jthread([this](auto stop_token) { return run_net(stop_token); });
 }
 
 void wivrn_session::stop()

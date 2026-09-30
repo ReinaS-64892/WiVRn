@@ -366,6 +366,9 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 	self->network_session->send_control(from_headset::session_state_changed{
 	        .state = application::get_session_state(),
 	});
+	// Event polling and stream creation both run on the application thread.
+	// Later events reach us through lobby::next_scene until the scene switches.
+	self->send_user_presence();
 	self->network_session->send_control(from_headset::stream_tab_changed{
 	        .tab = self->gui_status,
 	});
@@ -1460,10 +1463,7 @@ void scenes::stream::on_xr_event(const xr::event & event)
 				});
 			break;
 		case XR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT:
-			network_session->send_control(from_headset::user_presence_changed{
-			        .present = (bool)event.user_presence_changed.isUserPresent,
-			        .change_time = instance.now(),
-			});
+			send_user_presence();
 			break;
 		case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
 			on_interaction_profile_changed(event.interaction_profile_changed);
@@ -1471,6 +1471,15 @@ void scenes::stream::on_xr_event(const xr::event & event)
 		default:
 			break;
 	}
+}
+
+void scenes::stream::send_user_presence()
+{
+	if (auto present = application::get_user_presence())
+		network_session->send_control(from_headset::user_presence_changed{
+		        .present = *present,
+		        .change_time = instance.now(),
+		});
 }
 
 bool scenes::stream::forward_hid_input(from_headset::hid::input_t packet, bool device_enabled)

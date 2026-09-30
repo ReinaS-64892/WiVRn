@@ -134,6 +134,17 @@ endif()
 
 
 
+if(WIVRN_BUILD_TEST AND NOT ANDROID)
+    add_executable(user-presence-test tests/user_presence.cpp)
+    target_include_directories(user-presence-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(WIVRN_USE_SYSTEM_OPENXR)
+        target_link_libraries(user-presence-test PRIVATE OpenXR::headers)
+    else()
+        target_link_libraries(user-presence-test PRIVATE openxr_loader)
+    endif()
+    add_test(NAME user-presence COMMAND user-presence-test)
+endif()
+
 ##############################################################################
 # Main sources
 #

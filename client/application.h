@@ -35,6 +35,7 @@
 #include "xr/session.h"
 #include "xr/swapchain.h"
 #include "xr/system.h"
+#include "xr/user_presence.h"
 #include <atomic>
 #include <boost/locale/generator.hpp>
 #include <boost/locale/gnu_gettext.hpp>
@@ -123,6 +124,7 @@ private:
 	xr::system xr_system_id;
 	xr::session xr_session;
 	XrSessionState session_state = XR_SESSION_STATE_UNKNOWN;
+	xr::user_presence user_presence;
 
 	std::array<xr::space, size_t(xr::spaces::count)> spaces;
 	xr::actionset xr_actionset;
@@ -443,6 +445,11 @@ public:
 	static XrSessionState get_session_state()
 	{
 		return instance().session_state;
+	}
+
+	static std::optional<bool> get_user_presence()
+	{
+		return instance().user_presence.get();
 	}
 
 	static boost::locale::gnu_gettext::messages_info & get_messages_info()

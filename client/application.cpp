@@ -1471,6 +1471,7 @@ void application::initialize()
 
 	initialize_vulkan();
 
+	user_presence.reset();
 	xr_session = xr::session(xr_instance, xr_system_id, vk_instance, vk_physical_device, vk_device, vk_queue, vk_queue_family_index);
 
 	spaces[size_t(xr::spaces::view)] = xr_session.create_reference_space(XR_REFERENCE_SPACE_TYPE_VIEW);
@@ -1740,6 +1741,7 @@ void application::setup_jni()
 
 void application::cleanup()
 {
+	user_presence.reset();
 	// Remove all scenes before destroying the allocator
 	scene_stack.clear();
 
@@ -2050,6 +2052,8 @@ void application::session_state_changed(XrSessionState new_state, XrTime timesta
 	{
 		case XR_SESSION_STATE_READY:
 			xr_session.begin_session(app_info.viewconfig);
+			user_presence.begin(xr_session, xr_instance.has_extension(XR_EXT_USER_PRESENCE_EXTENSION_NAME) and
+			                                       xr_system_id.user_presence_properties().supportsUserPresence);
 			session_running = true;
 			break;
 
@@ -2072,14 +2076,17 @@ void application::session_state_changed(XrSessionState new_state, XrTime timesta
 			session_visible = false;
 			session_focused = false;
 			xr_session.end_session();
+			user_presence.reset();
 			session_running = false;
 			break;
 
 		case XR_SESSION_STATE_EXITING:
+			user_presence.reset();
 			exit_requested = true;
 			break;
 
 		case XR_SESSION_STATE_LOSS_PENDING:
+			user_presence.reset();
 			exit_requested = true;
 			break;
 		default:
@@ -2096,10 +2103,16 @@ void application::poll_events()
 		{
 			case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING: {
 				spdlog::info("Received XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING");
+				user_presence.reset();
 				exit_requested = true;
 			}
 			break;
 			case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
+				break;
+			case XR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT:
+				// Cache lobby events too, and do not forward events from another session.
+				if (not user_presence.update(e.user_presence_changed))
+					continue;
 				break;
 			case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED: {
 				if (e.state_changed.session == xr_session)
