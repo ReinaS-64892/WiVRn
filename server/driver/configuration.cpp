@@ -21,6 +21,7 @@
 
 #include "configuration.h"
 #include "lighthouse_reference_settings.h"
+#include "port_forwarding_config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -224,6 +225,22 @@ configuration::configuration()
 
 		if (auto it = json.find("bit-depth"); it != json.end())
 			bit_depth = *it;
+
+		// An invalid optional forwarding configuration must not prevent VR streaming.
+		try
+		{
+			auto forwarding_port = json.value("port-forwarding-port", int64_t(9758));
+			if (forwarding_port < 1 || forwarding_port > 65535)
+				throw std::runtime_error("Invalid port forwarding tunnel port");
+			port_forwarding_port = forwarding_port;
+			if (auto it = json.find("port-forwarding"); it != json.end())
+				port_forwarding = parse_forwarding_rules(*it);
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Port forwarding disabled: %s", e.what());
+			port_forwarding.clear();
+		}
 
 		if (auto it = json.find("tcp-only"); it != json.end())
 			tcp_only = *it;

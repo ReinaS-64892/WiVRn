@@ -34,6 +34,7 @@
 #include <openxr/openxr.h>
 
 #include "packed_quaternion.h"
+#include "port_forwarding.h"
 #include "smp.h"
 #include "wivrn_serialization_types.h"
 
@@ -786,6 +787,7 @@ struct handshake
 {
 	// -1 if stream socket should not be used
 	int stream_port;
+	forwarding_setup forwarding;
 };
 
 struct server_message
