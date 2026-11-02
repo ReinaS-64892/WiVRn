@@ -163,28 +163,39 @@ void scene::render_world(
 	beman::inplace_vector::inplace_vector<XrCompositionLayerProjectionView, layer::max_views> composition_layer_color;
 	beman::inplace_vector::inplace_vector<XrCompositionLayerDepthInfoKHR, layer::max_views> composition_layer_depth;
 
-	auto [color_swapchain, color_image] = [&]() -> std::tuple<XrSwapchain, vk::Image> {
-		xr::swapchain & color_swapchain = get_swapchain(swapchain_format, width, height, 1, views.size());
-
-		int color_image_index = color_swapchain.acquire();
-		vk::Image color_image = color_swapchain.image(color_image_index);
-		color_swapchain.wait();
-		return {color_swapchain, color_image};
-	}();
-
-	auto [depth_swapchain, depth_image] = [&]() -> std::pair<XrSwapchain, vk::Image> {
+	const auto mode = application::get_config().stereo_mode;
+	const bool separate = mode == stereo_render_mode::C or mode == stereo_render_mode::D;
+	const bool copy = mode == stereo_render_mode::C;
+	if (last_stereo_mode != int(mode))
+	{
+		spdlog::info("Stereo rendering test {}: {} view(s), {} swapchains, copy={}",
+		             magic_enum::enum_name(mode),
+		             views.size(),
+		             separate ? "per-eye" : "array",
+		             copy);
+		last_stereo_mode = int(mode);
+	}
+	std::vector<vk::Image> color_images;
+	std::vector<vk::Image> depth_images;
+	std::vector<XrSwapchain> color_swapchains;
+	std::vector<XrSwapchain> depth_swapchains;
+	const uint32_t array_size = separate ? 1 : views.size();
+	const uint32_t swapchain_count = separate ? views.size() : 1;
+	for (uint32_t i = 0; i < swapchain_count; ++i)
+	{
+		// Do not retain references across get_swapchain(): its vector may grow.
+		auto & color = get_swapchain(swapchain_format, width, height, 1, array_size, copy);
+		color_images.push_back(color.image(color.acquire()));
+		color.wait();
+		color_swapchains.push_back(color);
 		if (keep_depth_buffer)
 		{
-			xr::swapchain & depth_swapchain = get_swapchain(depth_format, width, height, 1, views.size());
-
-			int depth_image_index = depth_swapchain.acquire();
-			vk::Image depth_image = depth_swapchain.image(depth_image_index);
-			depth_swapchain.wait();
-			return {depth_swapchain, depth_image};
+			auto & depth = get_swapchain(depth_format, width, height, 1, array_size, copy);
+			depth_images.push_back(depth.image(depth.acquire()));
+			depth.wait();
+			depth_swapchains.push_back(depth);
 		}
-		else
-			return {};
-	}();
+	}
 
 	for (auto && [index, view]: utils::enumerate(views))
 	{
@@ -198,12 +209,12 @@ void scene::render_world(
 		        .pose = view.pose,
 		        .fov = view.fov,
 		        .subImage = {
-		                .swapchain = color_swapchain,
+		                .swapchain = color_swapchains[separate ? index : 0],
 		                .imageRect = {
 		                        .offset = {0, 0},
 		                        .extent = {(int)width, (int)height},
 		                },
-		                .imageArrayIndex = (uint32_t)index,
+		                .imageArrayIndex = separate ? 0 : (uint32_t)index,
 		        },
 		});
 
@@ -212,12 +223,12 @@ void scene::render_world(
 			composition_layer_depth.push_back({
 			        .type = XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR,
 			        .subImage = {
-			                .swapchain = depth_swapchain,
+			                .swapchain = depth_swapchains[separate ? index : 0],
 			                .imageRect = {
 			                        .offset = {0, 0},
 			                        .extent = {(int)width, (int)height},
 			                },
-			                .imageArrayIndex = (uint32_t)index,
+			                .imageArrayIndex = separate ? 0 : (uint32_t)index,
 			        },
 			        .minDepth = 0,
 			        .maxDepth = 1,
@@ -228,28 +239,34 @@ void scene::render_world(
 		}
 	}
 
-	// TODO: compute transforms only once
-
-	renderer->render(
-	        world,
-	        {clear_color.r, clear_color.g, clear_color.b, clear_color.a},
-	        layer_mask,
-	        vk::Extent2D{width, height},
-	        swapchain_format,
-	        depth_format,
-	        color_image,
-	        depth_image,
-	        frames,
-	        render_debug_draws);
+	const std::array clear{clear_color.r, clear_color.g, clear_color.b, clear_color.a};
+	if (copy)
+	{
+		renderer->render_multiview_copy(world, clear, layer_mask, {width, height}, swapchain_format, depth_format, color_images, depth_images, frames, render_debug_draws);
+	}
+	else if (mode == stereo_render_mode::B or mode == stereo_render_mode::D)
+	{
+		for (uint32_t eye = 0; eye < frames.size(); ++eye)
+		{
+			// The selected eye's matrices occupy UBO slot 0. B disables Vulkan
+			// multiview (viewMask=0); D preserves the workaround's viewMask=1.
+			const uint32_t image = separate ? eye : 0;
+			renderer->render(world, clear, layer_mask, {width, height}, swapchain_format, depth_format, color_images[image], keep_depth_buffer ? depth_images[image] : vk::Image{}, std::span{frames.data() + eye, 1}, render_debug_draws, separate ? 0 : eye, mode == stereo_render_mode::D);
+		}
+	}
+	else
+	{
+		renderer->render(world, clear, layer_mask, {width, height}, swapchain_format, depth_format, color_images[0], keep_depth_buffer ? depth_images[0] : vk::Image{}, frames, render_debug_draws);
+	}
 
 	add_projection_layer(
-	        XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
+	        flags,
 	        space,
 	        composition_layer_color,
 	        composition_layer_depth);
 }
 
-xr::swapchain & scene::get_swapchain(vk::Format format, int32_t width, int32_t height, int sample_count, uint32_t array_size)
+xr::swapchain & scene::get_swapchain(vk::Format format, int32_t width, int32_t height, int sample_count, uint32_t array_size, bool transfer_dst)
 {
 	// Look for an exact match
 	for (swapchain_entry & entry: swapchains)
@@ -259,20 +276,22 @@ xr::swapchain & scene::get_swapchain(vk::Format format, int32_t width, int32_t h
 		    entry.width == width and
 		    entry.height == height and
 		    entry.sample_count == sample_count and
-		    entry.array_size == array_size)
+		    entry.array_size == array_size and
+		    entry.transfer_dst == transfer_dst)
 		{
 			entry.used = true;
 			return entry.swapchain;
 		}
 	}
 
-	spdlog::info("Creating new swapchain: {}, {}x{}, {} sample(s), {} level(s)", magic_enum::enum_name(format), width, height, sample_count, array_size);
+	spdlog::info("Creating new swapchain: {}, {}x{}, {} sample(s), {} layer(s), transfer_dst={}", magic_enum::enum_name(format), width, height, sample_count, array_size, transfer_dst);
 	swapchain_entry new_swapchain{
 	        .format = format,
 	        .width = width,
 	        .height = height,
 	        .sample_count = sample_count,
 	        .array_size = array_size,
+	        .transfer_dst = transfer_dst,
 	        .used = true,
 	        .swapchain = xr::swapchain(
 	                instance,
@@ -282,7 +301,9 @@ xr::swapchain & scene::get_swapchain(vk::Format format, int32_t width, int32_t h
 	                width,
 	                height,
 	                sample_count,
-	                array_size)};
+	                array_size,
+	                false,
+	                transfer_dst)};
 	spdlog::info("Created swapchain");
 
 	return swapchains.emplace_back(std::move(new_swapchain)).swapchain;

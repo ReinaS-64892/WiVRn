@@ -772,6 +772,22 @@ void settings_system(const settings_context & ctx)
 	        .default_int = language_index(default_config),
 	});
 
+	list.push_back({
+	        .id = "##stereo_render_mode",
+	        .label = _("Stereo rendering test"),
+	        .description = _("Switches 3D scene rendering immediately. A/B submit an image array; C/D submit separate eye swapchains. Does not change streamed video or UI panels."),
+	        .ui = ui_kind::combo,
+	        .get_int = [&config] { return int(config.stereo_mode); },
+	        .set_int = [&config](int v) { config.stereo_mode = stereo_render_mode(v); config.save(); },
+	        .options = [] { return std::vector<std::string>{
+		                        _("A: Multiview / array swapchain"),
+		                        _("B: Single-view passes / array swapchain"),
+		                        _("C: Multiview / copy to separate swapchains"),
+		                        _("D: Per-eye passes / separate swapchains")}; },
+	        .title = _("Stereo rendering test"),
+	        .default_int = int(default_config.stereo_mode),
+	});
+
 #ifdef __ANDROID__
 	if (application::get_hmd_traits().usb_net)
 		list.push_back({

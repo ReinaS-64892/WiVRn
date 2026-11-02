@@ -56,6 +56,15 @@ enum class posture
 	seated,
 };
 
+// Diagnostic modes: draw strategy and OpenXR swapchain topology are independent.
+enum class stereo_render_mode
+{
+	A, // multiview -> array swapchain
+	B, // single-view passes -> array swapchain
+	C, // multiview -> internal array -> separate swapchains
+	D, // one-view multiview passes -> separate swapchains
+};
+
 class configuration
 {
 public:
@@ -76,6 +85,8 @@ public:
 	std::optional<wivrn::video_codec> codec;
 	uint32_t bitrate_bps = 50'000'000;
 	uint8_t bit_depth = 10;
+
+	stereo_render_mode stereo_mode = stereo_render_mode::A;
 
 	bool passthrough_enabled = false;
 	// XR_META_boundary_visibility, the boundary is always shown outside passthrough

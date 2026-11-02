@@ -45,6 +45,7 @@ struct renderpass_info
 	bool keep_depth_buffer;
 	vk::SampleCountFlagBits msaa_samples = vk::SampleCountFlagBits::e1;
 	uint32_t multiview_count;
+	bool multiview = true;
 
 	bool operator==(const renderpass_info & other) const noexcept = default;
 };
@@ -80,6 +81,7 @@ struct output_image_info
 	vk::Extent2D output_size;
 	VkImage color;
 	VkImage depth;
+	uint32_t base_array_layer = 0;
 
 	bool operator==(const output_image_info & other) const noexcept = default;
 };
@@ -149,6 +151,13 @@ class scene_renderer
 
 	// Caches
 	std::unordered_map<renderpass_info, renderpass> renderpasses;
+	struct intermediate_images
+	{
+		image_allocation color;
+		image_allocation depth;
+	};
+	// Declared before output_images so framebuffers/views are destroyed first.
+	std::unordered_map<output_image_info, intermediate_images> intermediate_outputs;
 	std::unordered_map<output_image_info, output_image> output_images;
 	std::unordered_map<pipeline_info, vk::raii::Pipeline> pipelines;
 	utils::cache<std::string, shader, shader_loader> shader_cache;
@@ -276,7 +285,23 @@ public:
 	        vk::Image color_buffer,
 	        vk::Image depth_buffer,
 	        std::span<frame_info> info,
-	        bool render_debug_draws = false);
+	        bool render_debug_draws = false,
+	        uint32_t base_array_layer = 0,
+	        bool multiview = true);
+
+	// Render to a persistent internal array, then copy each layer to a single-eye
+	// OpenXR image. Copies are recorded in the same command buffer as rendering.
+	void render_multiview_copy(
+	        entt::registry & scene,
+	        const std::array<float, 4> & clear_color,
+	        uint32_t layer_mask,
+	        vk::Extent2D output_size,
+	        vk::Format color_format,
+	        vk::Format depth_format,
+	        std::span<vk::Image> color_images,
+	        std::span<vk::Image> depth_images,
+	        std::span<frame_info> frames,
+	        bool render_debug_draws);
 	void end_frame();
 
 	void debug_draw_clear();

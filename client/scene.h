@@ -101,6 +101,7 @@ protected:
 	const meta & current_meta;
 
 	std::shared_ptr<scene_renderer> renderer;
+	int last_stereo_mode = -1;
 
 	using gltf_cache_type = utils::cache<std::string, entt::registry, scene_loader>;
 	std::shared_ptr<gltf_cache_type> gltf_cache;
@@ -155,6 +156,7 @@ protected:
 		int32_t height;
 		int sample_count;
 		uint32_t array_size;
+		bool transfer_dst;
 
 		bool used;
 		xr::swapchain swapchain;
@@ -162,7 +164,7 @@ protected:
 	std::vector<swapchain_entry> swapchains;
 
 	// The returned reference is valid until the next call to get_swapchain
-	xr::swapchain & get_swapchain(vk::Format format, int32_t width, int32_t height, int sample_count, uint32_t array_size);
+	xr::swapchain & get_swapchain(vk::Format format, int32_t width, int32_t height, int sample_count, uint32_t array_size, bool transfer_dst = false);
 	void clear_swapchains();
 
 	void render_start(bool passthrough, XrTime predicted_display_time);

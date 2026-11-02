@@ -340,6 +340,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("first_run", &configuration::first_run),
 	        scalar("locale", &configuration::locale),
 	        scalar("environment_model", &configuration::environment_model),
+	        scalar("stereo_render_mode", &configuration::stereo_mode),
 	        scalar("high_power_mode", &configuration::high_power_mode),
 	        scalar("fps_divider", &configuration::fps_divider),
 	        scalar("extended_config", &configuration::extended_config),

@@ -188,3 +188,40 @@ Change the TCP/UDP port used for the connection.
 Default value: unset
 
 If set, overrides the name displayed in the server list.
+
+
+## Headset stereo rendering diagnostics
+
+In the headset's **System** settings, **Stereo rendering test** switches the
+3D scene rendering path immediately. The selection is saved in the headset's
+`client.json` as `"stereo_render_mode": "A"` (or `"B"`, `"C"`, `"D"`).
+The default is A. This setting affects the lobby environment and locally drawn
+3D scenes, not decoded streaming video or OpenXR quad UI panels.
+
+| Mode | Vulkan rendering | OpenXR submission |
+| --- | --- | --- |
+| A | Both eyes in one multiview pass (`viewMask=3`) | One two-layer swapchain, eye indices 0/1 |
+| B | Two ordinary single-view passes (`viewMask=0`), each eye's matrices in UBO slot 0 | Same array topology as A, with a separate attachment view for each layer |
+| C | Both eyes in one multiview pass to an internal image array, followed by per-layer copies | Two single-layer swapchains, eye indices 0/0 |
+| D | Two per-eye passes (`viewMask=1`), each eye's matrices in UBO slot 0 | Two single-layer swapchains, eye indices 0/0 |
+
+Depth follows the same topology as color when it is submitted to OpenXR. C
+requests transfer destination usage for its OpenXR swapchains, copies color and
+submitted depth, and restores their attachment layouts before releasing them.
+Intermediate images and swapchains are retained for reuse across mode switches;
+C consumes additional GPU memory and copy bandwidth. If a runtime does not
+support the transfer usage required by C, swapchain creation may fail; no silent
+fallback to another mode is performed.
+
+Compare the same environment and head pose in A, B, C, and D, recording left/right
+appearance and whether head movement produces the expected stereo parallax.
+Disable passthrough so the environment is visible. The selected mode and newly
+created swapchain topology/transfer usage are logged. A build with
+`WIVRN_FEATURE_RENDERDOC=ON` can capture the lobby rendering: inspect both color
+array layers after the scene pass (before the copies in C) and compare them with
+the images submitted to OpenXR. The selector itself does not read images back.
+
+B failing while C succeeds points toward array swapchain handling. B succeeding
+while C's internal right-eye image is already wrong points toward multiview
+rendering. These are diagnostic clues; the final displayed result alone does not
+establish which component is at fault.

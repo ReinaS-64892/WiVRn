@@ -428,11 +428,14 @@ scene_renderer::renderpass scene_renderer::create_renderpass(const renderpass_in
 	auto & multiview = info.get<vk::RenderPassMultiviewCreateInfo>();
 	multiview.subpassCount = 1;
 
-	std::array view_mask{uint32_t((1 << info_.multiview_count) - 1)};
+	std::array view_mask{uint32_t(info_.multiview ? (1 << info_.multiview_count) - 1 : 0)};
 	multiview.setViewMasks(view_mask);
 
-	std::array correlation_mask{uint32_t((1 << info_.multiview_count) - 1)};
+	std::array correlation_mask{uint32_t(info_.multiview ? (1 << info_.multiview_count) - 1 : 0)};
 	multiview.setCorrelationMasks(correlation_mask);
+
+	if (not info_.multiview)
+		info.unlink<vk::RenderPassMultiviewCreateInfo>();
 
 	rp.attachment_count = (uint32_t)attachments.size();
 	rp.renderpass = vk::raii::RenderPass(device, info.get());
@@ -463,7 +466,7 @@ scene_renderer::output_image scene_renderer::create_output_image_data(const outp
 	                                .aspectMask = vk::ImageAspectFlagBits::eColor,
 	                                .baseMipLevel = 0,
 	                                .levelCount = 1,
-	                                .baseArrayLayer = 0,
+	                                .baseArrayLayer = info.base_array_layer,
 	                                .layerCount = info.renderpass.multiview_count,
 	                        },
 	                });
@@ -503,7 +506,7 @@ scene_renderer::output_image scene_renderer::create_output_image_data(const outp
 	                        .aspectMask = vk::ImageAspectFlagBits::eDepth,
 	                        .baseMipLevel = 0,
 	                        .levelCount = 1,
-	                        .baseArrayLayer = 0,
+	                        .baseArrayLayer = info.depth ? info.base_array_layer : 0,
 	                        .layerCount = info.renderpass.multiview_count,
 	                },
 	        });
@@ -865,9 +868,12 @@ void scene_renderer::render(
         vk::Image color_buffer,
         vk::Image depth_buffer,
         std::span<frame_info> frames,
-        bool render_debug_draws)
+        bool render_debug_draws,
+        uint32_t base_array_layer,
+        bool multiview)
 {
-	assert(frames.size() <= instance_gpu_data{}.modelview.size());
+	assert(not frames.empty() and frames.size() <= instance_gpu_data{}.modelview.size());
+	assert(multiview or frames.size() == 1);
 
 	per_frame_resources & resources = current_frame();
 
@@ -917,6 +923,7 @@ void scene_renderer::render(
 	        .msaa_samples = vk::SampleCountFlagBits::e1,
 	        // .msaa_samples = vk::SampleCountFlagBits::e4, // FIXME: MSAA does not work
 	        .multiview_count = (uint32_t)frames.size(),
+	        .multiview = multiview,
 	};
 	vk::raii::RenderPass & renderpass = get_renderpass(rp_info).renderpass;
 
@@ -1011,6 +1018,7 @@ void scene_renderer::render(
 	        .output_size = output_size,
 	        .color = color_buffer,
 	        .depth = depth_buffer,
+	        .base_array_layer = base_array_layer,
 	});
 
 	vk::DeviceSize frame_ubo_offset = resources.uniform_buffer_offset;
@@ -1403,6 +1411,119 @@ void scene_renderer::render(
 	}
 
 	cb.endRenderPass();
+}
+
+void scene_renderer::render_multiview_copy(
+        entt::registry & scene,
+        const std::array<float, 4> & clear_color,
+        uint32_t layer_mask,
+        vk::Extent2D output_size,
+        vk::Format color_format,
+        vk::Format depth_format,
+        std::span<vk::Image> color_images,
+        std::span<vk::Image> depth_images,
+        std::span<frame_info> frames,
+        bool render_debug_draws)
+{
+	assert(not frames.empty() and color_images.size() == frames.size());
+	assert(depth_images.empty() or depth_images.size() == frames.size());
+	const uint32_t count = frames.size();
+	const bool keep_depth = not depth_images.empty();
+	output_image_info key{
+	        .renderpass = {
+	                .color_format = color_format,
+	                .depth_format = depth_format,
+	                .keep_depth_buffer = keep_depth,
+	                .multiview_count = count,
+	        },
+	        .output_size = output_size,
+	        .color = color_images.front(),
+	        .depth = keep_depth ? VkImage(depth_images.front()) : VK_NULL_HANDLE,
+	};
+	// Cache by destination image so intermediate images and their cached views
+	// remain alive across frames and mode switches, without per-frame allocation.
+	auto & images = intermediate_outputs[key];
+	auto allocate = [&](vk::Format format, vk::ImageUsageFlags usage) {
+		return image_allocation{
+		        device,
+		        vk::ImageCreateInfo{
+		                .imageType = vk::ImageType::e2D,
+		                .format = format,
+		                .extent = {output_size.width, output_size.height, 1},
+		                .mipLevels = 1,
+		                .arrayLayers = count,
+		                .samples = vk::SampleCountFlagBits::e1,
+		                .tiling = vk::ImageTiling::eOptimal,
+		                .usage = usage | vk::ImageUsageFlagBits::eTransferSrc,
+		        },
+		        VmaAllocationCreateInfo{
+		                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+		        }};
+	};
+	if (not images.color)
+		images.color = allocate(color_format, vk::ImageUsageFlagBits::eColorAttachment);
+	if (keep_depth and not images.depth)
+		images.depth = allocate(depth_format, vk::ImageUsageFlagBits::eDepthStencilAttachment);
+
+	render(scene, clear_color, layer_mask, output_size, color_format, depth_format, images.color, keep_depth ? vk::Image(images.depth) : vk::Image{}, frames, render_debug_draws);
+
+	auto & cb = current_frame().cb;
+	auto copy_layers = [&](vk::Image source, std::span<vk::Image> destinations, bool depth) {
+		const auto layout = depth ? vk::ImageLayout::eDepthStencilAttachmentOptimal : vk::ImageLayout::eColorAttachmentOptimal;
+		vk::ImageAspectFlags aspects = depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor;
+		// Without separateDepthStencilLayouts, barriers must include both aspects
+		// of combined formats, even though OpenXR only consumes the depth aspect.
+		if (depth and (depth_format == vk::Format::eD16UnormS8Uint or depth_format == vk::Format::eD24UnormS8Uint or depth_format == vk::Format::eD32SfloatS8Uint))
+			aspects |= vk::ImageAspectFlagBits::eStencil;
+		const vk::AccessFlags attachment_access = depth
+		                                                  ? vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentWrite
+		                                                  : vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite;
+		std::vector<vk::ImageMemoryBarrier> barriers;
+		barriers.push_back({
+		        .srcAccessMask = attachment_access,
+		        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+		        .oldLayout = layout,
+		        .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+		        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		        .image = source,
+		        .subresourceRange = {aspects, 0, 1, 0, count},
+		});
+		for (auto destination: destinations)
+			barriers.push_back({
+			        .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+			        .oldLayout = layout,
+			        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+			        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			        .image = destination,
+			        .subresourceRange = {aspects, 0, 1, 0, 1},
+			});
+		cb.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, barriers);
+
+		for (uint32_t eye = 0; eye < count; ++eye)
+		{
+			vk::ImageCopy region{
+			        .srcSubresource = {depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor, 0, eye, 1},
+			        .dstSubresource = {depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+			        .extent = {output_size.width, output_size.height, 1},
+			};
+			cb.copyImage(source, vk::ImageLayout::eTransferSrcOptimal, destinations[eye], vk::ImageLayout::eTransferDstOptimal, region);
+		}
+
+		// Restore the OpenXR-required layouts before xrReleaseSwapchainImage.
+		// Restoring the source also orders the next frame's writes after this copy.
+		for (auto & barrier: barriers)
+		{
+			barrier.srcAccessMask = barrier.dstAccessMask;
+			barrier.dstAccessMask = attachment_access;
+			std::swap(barrier.oldLayout, barrier.newLayout);
+		}
+		cb.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, barriers);
+	};
+	copy_layers(images.color, color_images, false);
+	if (keep_depth)
+		copy_layers(images.depth, depth_images, true);
 }
 
 void scene_renderer::debug_draw_clear()
