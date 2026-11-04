@@ -1,0 +1,351 @@
+From: OpenAI Codex <codex@openai.com>
+Date: Tue, 3 Nov 2026 21:00:00 +0900
+Subject: [PATCH] d/steamvr_lh: expose base stations as pose-only trackers
+
+Expose activated Lighthouse references through the existing xdev pose API.
+Keep the original LHB- serial and the same tracking origin, chaperone and
+stabilization composition as real trackers. Do not write reference-space
+or tracking-origin offsets. xrizer filters LHB- serials out of body trackers.
+
+Keep driver-facing references owned by Context and export separate xdevs
+holding Context alive. Publish initial and hotplug devices only after
+activation; preserve low-rate station poses without motion prediction and
+honor disconnect/invalid updates. LH_EXPOSE_BASE_STATIONS=0 disables export.
+
+Test callback composition, low-rate holding, disconnect/reconnect, roles,
+hotplug, and ownership alongside existing diagnostic/stabilization tests.
+---
+diff --git a/src/xrt/drivers/steamvr_lh/device.cpp b/src/xrt/drivers/steamvr_lh/device.cpp
+index 9fbb3586a..ccb057824 100644
+--- a/src/xrt/drivers/steamvr_lh/device.cpp
++++ b/src/xrt/drivers/steamvr_lh/device.cpp
+@@ -307,6 +307,50 @@ Device::~Device()
+ 	m_relation_history_destroy(&relation_hist);
+ }
+ 
++namespace {
++// Context owns the callback target; the exported xdev owns Context. Keeping
++// these objects separate avoids both a reference cycle and double destruction.
++struct BaseStationTracker : xrt_device
++{
++	std::shared_ptr<Context> owner;
++	TrackingReferenceDevice *reference;
++	xrt_input pose_input{};
++
++	BaseStationTracker(std::shared_ptr<Context> context, TrackingReferenceDevice *device)
++	    : xrt_device{}, owner(std::move(context)), reference(device)
++	{
++		u_device_id_assign(this);
++		name = XRT_DEVICE_VIVE_TRACKER;
++		device_type = XRT_DEVICE_TYPE_GENERIC_TRACKER;
++		std::snprintf(str, sizeof(str), "Lighthouse Base Station Tracker");
++		std::snprintf(serial, sizeof(serial), "%s", device->serial);
++		tracking_origin = owner.get();
++		supported.orientation_tracking = supported.position_tracking = true;
++		pose_input.active = true;
++		pose_input.name = XRT_INPUT_GENERIC_TRACKER_POSE;
++		inputs = &pose_input;
++		input_count = 1;
++		update_inputs = u_device_noop_update_inputs;
++		get_tracked_pose = [](xrt_device *xdev, xrt_input_name input, int64_t timestamp,
++		                      xrt_space_relation *out) -> xrt_result_t {
++			if (input != XRT_INPUT_GENERIC_TRACKER_POSE)
++				return XRT_ERROR_INPUT_UNSUPPORTED;
++			auto *self = static_cast<BaseStationTracker *>(xdev);
++			self->reference->get_pose(timestamp, out);
++			return XRT_SUCCESS;
++		};
++		destroy = [](xrt_device *xdev) { delete static_cast<BaseStationTracker *>(xdev); };
++		u_device_populate_function_pointers(this, get_tracked_pose, destroy);
++	}
++};
++} // namespace
++
++xrt_device *
++TrackingReferenceDevice::create_tracker(const std::shared_ptr<Context> &owner)
++{
++	return new BaseStationTracker(owner, this);
++}
++
+ void
+ Device::standby_tracker()
+ {
+@@ -863,9 +907,10 @@ Device::get_pose(uint64_t at_timestamp_ns, xrt_space_relation *out_relation)
+ 		return raw * U_TIME_1MS_IN_NS;
+ 	}();
+ 
++	const bool reference = recording_class == vr::TrackedDeviceClass_TrackingReference;
+ 	const auto result = m_relation_history_get_clamped(
+-	    this->relation_hist, at_timestamp_ns, max_extrapolation_ns, nullptr, out_relation);
+-	if (result == M_RELATION_HISTORY_RESULT_PREDICTED) {
++	    this->relation_hist, at_timestamp_ns, reference ? 0 : max_extrapolation_ns, nullptr, out_relation);
++	if (!reference && result == M_RELATION_HISTORY_RESULT_PREDICTED) {
+ 		int64_t latest_ns;
+ 		xrt_space_relation latest{};
+ 		if (m_relation_history_get_latest(relation_hist, &latest_ns, &latest)) {
+@@ -874,6 +919,10 @@ Device::get_pose(uint64_t at_timestamp_ns, xrt_space_relation *out_relation)
+ 			                            out_relation);
+ 		}
+ 	}
++	if (reference) {
++		out_relation->linear_velocity = {};
++		out_relation->angular_velocity = {};
++	}
+ 	// A stale measurement timestamp may have kept the latest state notification
+ 	// out of history. Never report tracking/validity that it has revoked.
+ 	out_relation->relation_flags = static_cast<xrt_space_relation_flags>(
+@@ -1356,9 +1405,8 @@ Device::update_pose(const vr::DriverPose_t &newPose, uint32_t index, int64_t cap
+ 		lighthouse_reference::pose(serial, index, newPose, capture_ns, &metadata);
+ 	}
+ 
+-	// References are recorded at their callback time and are never predicted or published.
+-	if (recording_class == vr::TrackedDeviceClass_TrackingReference)
+-		return;
++	// Published references use the same composition/stabilization as controllers.
++	// They retain measured history, but get_pose never predicts station motion.
+ 
+ 	// Connection and tracking state describe this callback, not the age of
+ 	// its coordinates. Power-off notifications can carry offsets tens of
+diff --git a/src/xrt/drivers/steamvr_lh/device.hpp b/src/xrt/drivers/steamvr_lh/device.hpp
+index 015fb6357..9359ed0c3 100644
+--- a/src/xrt/drivers/steamvr_lh/device.hpp
++++ b/src/xrt/drivers/steamvr_lh/device.hpp
+@@ -99,7 +99,8 @@ public:
+ 	void
+ 	update_pose(const vr::DriverPose_t &newPose, uint32_t index, int64_t capture_ns) const;
+ 
+-	//! Helper to use the @ref m_relation_history member.
++	//! Helper to use the @ref m_relation_history member. References hold their
++	//! measured pose without predicting motion between low-rate callbacks.
+ 	void
+ 	get_pose(uint64_t at_timestamp_ns, xrt_space_relation *out_relation);
+ 
+@@ -319,14 +320,17 @@ private:
+ 	handle_property_write(const vr::PropertyWrite_t &prop) override;
+ };
+ 
+-// Diagnostic-only: no controller profile, inputs, or OpenXR device registration.
++// Context owns the driver-facing object; a separate xdev keeps Context alive
++// while OpenXR clients consume its pose. No controller inputs or roles.
+ // Context owns these and supplies a non-owning ContextPtr in the builder.
+ class TrackingReferenceDevice final : public Device
+ {
+ public:
+ 	vr::ITrackedDeviceServerDriver *reference_driver;
+ 	bool activated{false};
++	bool published{false};
+ 	TrackingReferenceDevice(const DeviceBuilder &builder) : Device(builder), reference_driver(builder.driver) {}
++	xrt_device *create_tracker(const std::shared_ptr<Context> &owner);
+ 	xrt_result_t
+ 	get_tracked_pose(xrt_input_name, uint64_t, xrt_space_relation *) override
+ 	{
+diff --git a/src/xrt/drivers/steamvr_lh/interfaces/context.hpp b/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
+index 8d6735fd0..5c54ec181 100644
+--- a/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
++++ b/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
+@@ -167,6 +167,8 @@ public:
+ 	bool stopping{false};
+ 	//! Call with devices_mut held.
+ 	void append_to_xsysd_locked(struct xrt_device *xdev);
++	//! Publish activated references, with devices_mut held.
++	void publish_tracking_references_locked(struct xrt_system_devices *system);
+ 	void stop_frame_thread();
+ 	bool request_tracker_standby(struct xrt_system_devices *system);
+ 	const u_logging_level log_level;
+diff --git a/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp b/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
+index 184ca023e..3417b4a64 100644
+--- a/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
++++ b/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
+@@ -84,6 +84,7 @@ DEBUG_GET_ONCE_LOG_OPTION(lh_log, "LIGHTHOUSE_LOG", U_LOGGING_INFO)
+ DEBUG_GET_ONCE_BOOL_OPTION(lh_load_slimevr, "LH_LOAD_SLIMEVR", false)
+ DEBUG_GET_ONCE_NUM_OPTION(lh_discover_wait_ms, "LH_DISCOVER_WAIT_MS", 3000)
+ DEBUG_GET_ONCE_BOOL_OPTION(lh_diagnostic_references, "LH_DIAGNOSTIC_REFERENCES", false)
++DEBUG_GET_ONCE_BOOL_OPTION(lh_expose_base_stations, "LH_EXPOSE_BASE_STATIONS", true)
+ DEBUG_GET_ONCE_FLOAT_OPTION(lh_stick_deadzone, "LH_STICK_DEADZONE", 0)
+ 
+ static constexpr size_t MAX_CONTROLLERS = 16;
+@@ -546,6 +547,8 @@ Context::setup_tracking_reference(const char *serial, vr::ITrackedDeviceServerDr
+ 	{
+ 		std::lock_guard lk(devices_mut);
+ 		device->activated = true;
++		if (xsysd != nullptr)
++			publish_tracking_references_locked(xsysd);
+ 	}
+ 	CTX_INFO("Activated diagnostic base station %s at index %u", serial, reference_index_begin + slot);
+ 	return true;
+@@ -599,6 +602,29 @@ Context::append_to_xsysd_locked(struct xrt_device *xdev)
+ 	__atomic_store_n(&xsysd->static_xdev_count, count + 1, __ATOMIC_RELEASE);
+ }
+ 
++void
++Context::publish_tracking_references_locked(struct xrt_system_devices *system)
++{
++	if (!debug_get_bool_option_lh_expose_base_stations())
++		return;
++	for (auto &reference : references) {
++		if (!reference || !reference->activated || reference->published)
++			continue;
++		if (system->static_xdev_count >= XRT_SYSTEM_MAX_DEVICES) {
++			CTX_WARN("Out of device slots, not exposing base station %s", reference->serial);
++			continue;
++		}
++		auto *tracker = reference->create_tracker(shared_from_this());
++		if (system == xsysd) {
++			append_to_xsysd_locked(tracker);
++		} else {
++			// Initial discovery: the builder creates spaces after we return.
++			system->static_xdevs[system->static_xdev_count++] = tracker;
++		}
++		reference->published = true;
++	}
++}
++
+ void
+ Context::extend_discover()
+ {
+@@ -649,7 +675,8 @@ Context::TrackedDeviceAdded(const char *pchDeviceSerialNumber,
+ 		CTX_INFO("Found lighthouse base station: %s", pchDeviceSerialNumber);
+ 		if (auto callback = reference_callback.load())
+ 			callback(pchDeviceSerialNumber);
+-		if (debug_get_bool_option_lh_diagnostic_references() || stabilizer.enabled())
++		if (debug_get_bool_option_lh_expose_base_stations() ||
++		    debug_get_bool_option_lh_diagnostic_references() || stabilizer.enabled())
+ 			added = setup_tracking_reference(pchDeviceSerialNumber, pDriver);
+ 		break;
+ 	}
+@@ -1321,6 +1348,7 @@ steamvr_lh_set_device_added_callback(struct xrt_system_devices *xsysd,
+ 			if (device != nullptr && device->activated)
+ 				ctx->append_to_xsysd_locked(device);
+ 		}
++		ctx->publish_tracking_references_locked(xsysd);
+ 	}
+ }
+ 
+@@ -1472,6 +1500,7 @@ steamvr_lh_create_devices(struct xrt_prober *xp, struct xrt_system_devices *xsys
+ 		}
+ 	}
+ 
++	ctx->publish_tracking_references_locked(xsysd);
+ 	ctx->cached_roles.generation_id = 1;
+ 	g_context = ctx;
+ 	return xrt_result::XRT_SUCCESS;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 8e040aac8..a9993aba8 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -163,7 +163,8 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
+ 	add_test(NAME steamvr_lh_references_on COMMAND tests_steamvr_lh_references on)
+ 	add_test(NAME steamvr_lh_references_off COMMAND tests_steamvr_lh_references off)
+ 	add_test(NAME steamvr_lh_references_stabilized COMMAND tests_steamvr_lh_references stabilized)
+-	set_tests_properties(steamvr_lh_references_on steamvr_lh_references_off steamvr_lh_references_stabilized PROPERTIES TIMEOUT 15 ENVIRONMENT "HOME=/nonexistent-lh-test")
++	add_test(NAME steamvr_lh_base_station_trackers COMMAND tests_steamvr_lh_references exposed)
++	set_tests_properties(steamvr_lh_references_on steamvr_lh_references_off steamvr_lh_references_stabilized steamvr_lh_base_station_trackers PROPERTIES TIMEOUT 15 ENVIRONMENT "HOME=/nonexistent-lh-test")
+ endif()
+ 
+ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
+diff --git a/tests/tests_steamvr_lh_references.cpp b/tests/tests_steamvr_lh_references.cpp
+index 7b5ed861d..80b9b14f9 100644
+--- a/tests/tests_steamvr_lh_references.cpp
++++ b/tests/tests_steamvr_lh_references.cpp
+@@ -2,6 +2,8 @@
+ // SPDX-License-Identifier: BSL-1.0
+ #include "interfaces/context.hpp"
+ #include "steamvr_lh_interface.h"
++#include "os/os_time.h"
++#include "util/u_device.h"
+ static unsigned reference_announcements{0};
+ #include <cmath>
+ #include <cstdlib>
+@@ -135,9 +137,92 @@ struct Provider : vr::IServerTrackedDeviceProvider
+ 	{}
+ };
+ 
++static void
++exposed_test()
++{
++	Provider provider;
++	Driver first, second;
++	auto context = Context::create("/nonexistent-lh-test", "/nonexistent-lh-test", {&provider});
++	CHECK(context);
++	first.host = second.host = context.get();
++	provider.first = &first;
++	CHECK(context->TrackedDeviceAdded("LHB-12345678", vr::TrackedDeviceClass_TrackingReference, &first));
++	xrt_system_devices system{};
++	{
++		std::lock_guard lock(context->devices_mut);
++		context->publish_tracking_references_locked(&system);
++		context->publish_tracking_references_locked(&system);
++	}
++	CHECK(system.static_xdev_count == 1);
++	auto *station = system.static_xdevs[0];
++	CHECK(std::strcmp(station->serial, "LHB-12345678") == 0);
++	CHECK(station->device_type == XRT_DEVICE_TYPE_GENERIC_TRACKER);
++	CHECK(station->tracking_origin == context.get());
++	CHECK(station->input_count == 1 && station->inputs[0].active);
++	CHECK(station->inputs[0].name == XRT_INPUT_GENERIC_TRACKER_POSE);
++	CHECK(!station->supported.hand_tracking && !station->supported.battery_status);
++	xrt_space_relation pose{};
++	// Station callbacks are sparse: hold the measurement, never predict motion.
++	CHECK(xrt_device_get_tracked_pose(station, XRT_INPUT_GENERIC_TRACKER_POSE,
++	                                 os_monotonic_get_ns() + 60000000000LL, &pose) == XRT_SUCCESS);
++	CHECK(pose.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
++	CHECK(std::abs(pose.pose.position.x - 10) < 1e-4f);
++	CHECK(std::abs(pose.pose.position.y - 21) < 1e-4f);
++	CHECK(std::abs(pose.pose.position.z - 28) < 1e-4f);
++	CHECK(xrt_device_get_tracked_pose(station, XRT_INPUT_GENERIC_HEAD_POSE,
++	                                 os_monotonic_get_ns(), &pose) == XRT_ERROR_INPUT_UNSUPPORTED);
++	vr::DriverPose_t update{};
++	update.qRotation.w = update.qWorldFromDriverRotation.w = update.qDriverFromHeadRotation.w = 1;
++	context->TrackedDevicePoseUpdated(first.index, update, sizeof(update));
++	xrt_device_get_tracked_pose(station, XRT_INPUT_GENERIC_TRACKER_POSE, os_monotonic_get_ns(), &pose);
++	CHECK(pose.relation_flags == 0);
++	update.poseIsValid = update.deviceIsConnected = true;
++	update.result = vr::TrackingResult_Running_OK;
++	update.vecPosition[0] = 4;
++	update.vecVelocity[0] = 10; // even spurious velocity must not move a station
++	context->TrackedDevicePoseUpdated(first.index, update, sizeof(update));
++	xrt_device_get_tracked_pose(station, XRT_INPUT_GENERIC_TRACKER_POSE,
++	                            os_monotonic_get_ns() + 60000000000LL, &pose);
++	CHECK(pose.relation_flags & XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
++	CHECK(std::abs(pose.pose.position.x - 4) < 1e-4f);
++	// Hotplug uses the same append callback as controllers, before publication.
++	unsigned additions = 0;
++	{
++		std::lock_guard lock(context->devices_mut);
++		context->in_setup = false;
++		context->xsysd = &system;
++		context->device_added_ud = &additions;
++		context->device_added_cb = [](xrt_device *dev, void *ud) {
++			CHECK(dev->inputs[0].name == XRT_INPUT_GENERIC_TRACKER_POSE);
++			++*static_cast<unsigned *>(ud);
++		};
++	}
++	CHECK(context->TrackedDeviceAdded("LHB-ABCDEF00", vr::TrackedDeviceClass_TrackingReference, &second));
++	CHECK(system.static_xdev_count == 2 && additions == 1);
++	CHECK(system.static_xdevs[1]->tracking_origin == station->tracking_origin);
++	xrt_system_roles roles{};
++	CHECK(context->get_roles(&system, &roles) == XRT_SUCCESS);
++	CHECK(roles.left == XRT_DEVICE_ROLE_UNASSIGNED && roles.right == XRT_DEVICE_ROLE_UNASSIGNED);
++	context->stop_frame_thread();
++	std::weak_ptr<Context> weak = context;
++	context.reset();
++	CHECK(!weak.expired());
++	xrt_device_destroy(&system.static_xdevs[0]);
++	CHECK(first.deactivations == 0 && second.deactivations == 0);
++	xrt_device_destroy(&system.static_xdevs[1]);
++	CHECK(weak.expired() && provider.cleaned);
++	CHECK(first.deactivations == 1 && second.deactivations == 1);
++}
++
+ int
+ main(int argc, char **argv)
+ {
++	const bool exposed = argc > 1 && std::strcmp(argv[1], "exposed") == 0;
++	setenv("LH_EXPOSE_BASE_STATIONS", exposed ? "1" : "0", 1);
++	if (exposed) {
++		exposed_test();
++		return 0;
++	}
+ 	const bool stabilized = argc > 1 && std::strcmp(argv[1], "stabilized") == 0;
+ 	const bool enabled = stabilized || (argc > 1 && std::strcmp(argv[1], "on") == 0);
+ 	setenv("LH_DIAGNOSTIC_REFERENCES", enabled && !stabilized ? "1" : "0", 1);
