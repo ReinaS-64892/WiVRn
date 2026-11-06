@@ -830,6 +830,11 @@ bool scenes::stream::is_gui_interactable() const
 
 void scenes::stream::render(const XrFrameState & frame_state)
 {
+	if (pending_absence_time && instance.now() >= *pending_absence_time)
+	{
+		network_session->send_control(from_headset::user_presence_changed{.present = false, .change_time = *pending_absence_time});
+		pending_absence_time.reset();
+	}
 	if (state_ == state::shutdown)
 		application::pop_scene();
 
@@ -1518,10 +1523,13 @@ void scenes::stream::on_xr_event(const xr::event & event)
 				});
 			break;
 		case XR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT:
-			network_session->send_control(from_headset::user_presence_changed{
-			        .present = (bool)event.user_presence_changed.isUserPresent,
-			        .change_time = instance.now(),
-			});
+			if (event.user_presence_changed.isUserPresent)
+			{
+				pending_absence_time.reset();
+				network_session->send_control(from_headset::user_presence_changed{.present = true, .change_time = instance.now()});
+			}
+			else if (not pending_absence_time)
+				pending_absence_time = instance.now() + int64_t(application::get_config().user_presence_debounce_ms) * 1'000'000;
 			break;
 		case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
 			on_interaction_profile_changed(event.interaction_profile_changed);

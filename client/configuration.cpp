@@ -348,6 +348,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("stream_scale", &configuration::stream_scale),
 	        scalar("codec", &configuration::codec),
 	        scalar("bit_depth", &configuration::bit_depth),
+	        scalar("user_presence_debounce_ms", &configuration::user_presence_debounce_ms),
 	        scalar("usb_network", &configuration::usb_network),
 	        scalar("height_offset_standing", &configuration::height_offset_standing),
 	        scalar("height_offset_seated", &configuration::height_offset_seated),
