@@ -354,6 +354,14 @@ if(WIVRN_BUILD_SERVER)
 	install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/lh-recorder-cli DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME lh-recorder)
 endif()
 
+if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER)
+    enable_testing()
+    add_executable(quaternion-interpolation-test driver/tests/quaternion_interpolation.cpp)
+    target_include_directories(quaternion-interpolation-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_BINARY_DIR}/common)
+    target_link_libraries(quaternion-interpolation-test PRIVATE Eigen3::Eigen xrt-external-openxr)
+    add_test(NAME quaternion-interpolation COMMAND quaternion-interpolation-test)
+endif()
+
 if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER AND WIVRN_FEATURE_STEAMVR_LIGHTHOUSE)
     add_executable(lh-recording-startup-test
         ../tools/lh-recorder/tests/startup_harness.cpp
