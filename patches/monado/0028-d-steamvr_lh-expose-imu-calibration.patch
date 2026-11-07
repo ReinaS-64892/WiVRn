@@ -1,0 +1,237 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] d/steamvr_lh: expose live receiver calibration through libmonado
+
+Export the receiver and the exact head-from-xdev-grip pose offset. Query live
+metadata under the device property mutex so pairing changes do not reuse a
+cached receiver. The optional companion API allows QuestLHSync to align raw
+receiver IMU samples with poses without guessing grip coordinate systems.
+
+diff --git a/src/xrt/drivers/steamvr_lh/device.cpp b/src/xrt/drivers/steamvr_lh/device.cpp
+--- a/src/xrt/drivers/steamvr_lh/device.cpp
++++ b/src/xrt/drivers/steamvr_lh/device.cpp
+@@ -386,6 +386,36 @@
+ 	this->supported.brightness_control = true;
+ 
+ 	this->xrt_device::update_inputs = u_device_noop_update_inputs;
++	this->xrt_device::get_lighthouse_calibration = [](xrt_device *xdev, char *receiver,
++	                                                xrt_pose *head_from_pose) -> bool {
++		auto *dev = static_cast<Device *>(xdev);
++		std::lock_guard lock(dev->ctx->devices_mut);
++		// xdev selects the first grip pose. Export its exact static offset, not
++		// an assumption about tracker or controller model coordinates.
++		if (dev->recording_class != vr::TrackedDeviceClass_Controller &&
++		    dev->recording_class != vr::TrackedDeviceClass_GenericTracker)
++			return false;
++		if (!dev->input_class || dev->input_class->poses.empty())
++			return false;
++		const auto pose = dev->input_class->poses.front();
++		switch (pose) {
++		case XRT_INPUT_VIVE_GRIP_POSE:
++		case XRT_INPUT_INDEX_GRIP_POSE:
++		case XRT_INPUT_GENERIC_TRACKER_POSE:
++		case XRT_INPUT_VIVE_TRACKER_GRIP_POSE: break;
++		default: return false; // xdev must agree on which pose was selected
++		}
++		auto it = dev->properties.find(vr::Prop_ConnectedWirelessDongle_String);
++		if (it == dev->properties.end() || it->second.tag != vr::k_unStringPropertyTag)
++			return false;
++		const auto &buffer = it->second.buffer;
++		const size_t n = std::min(buffer.size(), size_t(XRT_DEVICE_NAME_LEN - 1));
++		std::memcpy(receiver, buffer.data(), n);
++		receiver[n] = '\0';
++		*head_from_pose = XRT_POSE_IDENTITY;
++		vive_poses_get_pose_offset(dev->input_class->name, dev->device_type, pose, head_from_pose);
++		return receiver[0] != '\0';
++	};
+ #define SETUP_MEMBER_FUNC(name) this->xrt_device::name = &device_bouncer<Device, &Device::name>
+ 	SETUP_MEMBER_FUNC(get_tracked_pose);
+ 	SETUP_MEMBER_FUNC(get_battery_status);
+diff --git a/src/xrt/drivers/steamvr_lh/device.hpp b/src/xrt/drivers/steamvr_lh/device.hpp
+--- a/src/xrt/drivers/steamvr_lh/device.hpp
++++ b/src/xrt/drivers/steamvr_lh/device.hpp
+@@ -137,7 +137,7 @@
+ 	std::unordered_map<std::string_view, xrt_input *> inputs_map;
+ 	std::vector<xrt_input> inputs_vec;
+ 	xrt_pose &chaperone;
+-	const InputClass *input_class;
++	const InputClass *input_class{nullptr};
+ 	std::string manufacturer;
+ 	std::string model;
+ 	float vsync_to_photon_ns{0.f};
+diff --git a/src/xrt/include/xrt/xrt_device.h b/src/xrt/include/xrt/xrt_device.h
+--- a/src/xrt/include/xrt/xrt_device.h
++++ b/src/xrt/include/xrt/xrt_device.h
+@@ -367,6 +367,12 @@
+ 
+ 	//! A unique identifier. Persistent across configurations, if possible.
+ 	char serial[XRT_DEVICE_NAME_LEN];
++
++	//! Optional Lighthouse IMU metadata. head_from_pose undoes the xdev grip offset.
++	//! The implementation must synchronize with property updates.
++	bool (*get_lighthouse_calibration)(struct xrt_device *xdev,
++	                                   char receiver[XRT_DEVICE_NAME_LEN],
++	                                   struct xrt_pose *head_from_pose);
+ 
+ 	//! Null if this device does not interface with the users head.
+ 	struct xrt_hmd_parts *hmd;
+diff --git a/src/xrt/ipc/server/ipc_server_handler.c b/src/xrt/ipc/server/ipc_server_handler.c
+--- a/src/xrt/ipc/server/ipc_server_handler.c
++++ b/src/xrt/ipc/server/ipc_server_handler.c
+@@ -1773,6 +1773,12 @@
+ 	out_info->tracking_origin_id = tracking_origin_id;
+ 	memcpy(out_info->str, xdev->str, sizeof(out_info->str));
+ 	memcpy(out_info->serial, xdev->serial, sizeof(out_info->serial));
++	out_info->lighthouse_receiver[0] = '\0';
++	out_info->lighthouse_head_from_pose = (struct xrt_pose)XRT_POSE_IDENTITY;
++	out_info->lighthouse_calibration =
++	    xdev->get_lighthouse_calibration != NULL &&
++	    xdev->get_lighthouse_calibration(xdev, out_info->lighthouse_receiver,
++	                                     &out_info->lighthouse_head_from_pose);
+ 	out_info->supported = xdev->supported;
+ 
+ 	// Fill in binding profile count
+diff --git a/src/xrt/ipc/shared/ipc_protocol.h b/src/xrt/ipc/shared/ipc_protocol.h
+--- a/src/xrt/ipc/shared/ipc_protocol.h
++++ b/src/xrt/ipc/shared/ipc_protocol.h
+@@ -169,6 +169,11 @@
+ 
+ 	//! A unique identifier. Persistent across configurations, if possible.
+ 	char serial[XRT_DEVICE_NAME_LEN];
++
++	//! Optional Lighthouse receiver and head-from-xdev-pose calibration.
++	bool lighthouse_calibration;
++	char lighthouse_receiver[XRT_DEVICE_NAME_LEN];
++	struct xrt_pose lighthouse_head_from_pose;
+ 
+ 	//! Number of binding profiles in varlen data.
+ 	uint32_t binding_profile_count;
+diff --git a/src/xrt/targets/libmonado/libmonado.def b/src/xrt/targets/libmonado/libmonado.def
+--- a/src/xrt/targets/libmonado/libmonado.def
++++ b/src/xrt/targets/libmonado/libmonado.def
+@@ -13,6 +13,7 @@
+     mnd_root_set_client_io_blocks
+     mnd_root_get_device_count
+     mnd_root_get_device_info
++    mnd_root_get_lighthouse_calibration
+     mnd_root_get_device_from_role
+     mnd_root_recenter_local_spaces
+     mnd_root_get_reference_space_offset
+diff --git a/src/xrt/targets/libmonado/monado.c b/src/xrt/targets/libmonado/monado.c
+--- a/src/xrt/targets/libmonado/monado.c
++++ b/src/xrt/targets/libmonado/monado.c
+@@ -694,6 +694,26 @@
+ }
+ 
+ mnd_result_t
++mnd_root_get_lighthouse_calibration(mnd_root_t *root, uint32_t device_index,
++                                    const char **out_receiver, mnd_pose_t *out_head_from_pose)
++{
++	CHECK_NOT_NULL(root);
++	CHECK_NOT_NULL(out_receiver);
++	CHECK_NOT_NULL(out_head_from_pose);
++	CHECK_DEVICE_INDEX(device_index);
++	*out_receiver = NULL;
++	struct ipc_device_info *info = &root->device_infos[device_index];
++	const uint32_t id = root->device_list.devices[device_index].id;
++	if (ipc_call_device_get_info_no_arrays(&root->ipc_c, id, info) != XRT_SUCCESS)
++		return MND_ERROR_OPERATION_FAILED;
++	if (!info->lighthouse_calibration)
++		return MND_ERROR_INVALID_OPERATION;
++	*out_receiver = info->lighthouse_receiver;
++	memcpy(out_head_from_pose, &info->lighthouse_head_from_pose, sizeof(*out_head_from_pose));
++	return MND_SUCCESS;
++}
++
++mnd_result_t
+ mnd_root_get_device_info(mnd_root_t *root, uint32_t device_index, uint32_t *out_device_id, const char **out_dev_name)
+ {
+ 	CHECK_NOT_NULL(root);
+diff --git a/src/xrt/targets/libmonado/monado.h b/src/xrt/targets/libmonado/monado.h
+--- a/src/xrt/targets/libmonado/monado.h
++++ b/src/xrt/targets/libmonado/monado.h
+@@ -109,6 +109,7 @@
+  */
+ typedef struct mnd_root mnd_root_t;
+ 
++
+ /*!
+  * A pose composed of a position and orientation.
+  */
+@@ -124,6 +125,14 @@
+ 	} position;
+ } mnd_pose_t;
+ 
++/* WiVRn companion extension. Refreshes live metadata; the returned receiver
++ * string is owned by root until the next call for this device. head_from_pose
++ * is the offset used by the xdev pose: head_pose = xdev_pose * inverse(offset).
++ * Returns MND_ERROR_INVALID_OPERATION if this device has no calibration. */
++mnd_result_t
++mnd_root_get_lighthouse_calibration(mnd_root_t *root, uint32_t device_index,
++                                    const char **out_receiver, mnd_pose_t *out_head_from_pose);
++
+ 
+ /*!
+  * A 3 element colour with floating point channels.
+diff --git a/tests/tests_steamvr_lh_stabilization.cpp b/tests/tests_steamvr_lh_stabilization.cpp
+--- a/tests/tests_steamvr_lh_stabilization.cpp
++++ b/tests/tests_steamvr_lh_stabilization.cpp
+@@ -187,6 +187,7 @@
+ {
+ public:
+ 	explicit TestDevice(const DeviceBuilder &builder) : Device(builder) {}
++	void calibration_profile(const InputClass *profile) { input_class = profile; }
+ 	xrt_result_t
+ 	get_tracked_pose(xrt_input_name, uint64_t t, xrt_space_relation *r) override
+ 	{
+@@ -194,6 +195,43 @@
+ 		return XRT_SUCCESS;
+ 	}
+ };
++void
++calibration_metadata_test()
++{
++	auto context = Context::create("/nonexistent-lh-test", "/nonexistent-lh-test", {});
++	TestDevice device(DeviceBuilder{context, nullptr, "LHR-test", "/nonexistent-lh-test",
++	                                vr::TrackedDeviceClass_GenericTracker});
++	char receiver[XRT_DEVICE_NAME_LEN]{};
++	xrt_pose offset{};
++	CHECK(!device.get_lighthouse_calibration(&device, receiver, &offset));
++	const InputClass tracker{XRT_DEVICE_VIVE_TRACKER, {XRT_INPUT_GENERIC_TRACKER_POSE}, {}};
++	device.calibration_profile(&tracker);
++	device.device_type = XRT_DEVICE_TYPE_GENERIC_TRACKER;
++	CHECK(!device.get_lighthouse_calibration(&device, receiver, &offset));
++	auto write = [&](const char *serial) {
++		vr::PropertyWrite_t prop{};
++		prop.prop = vr::Prop_ConnectedWirelessDongle_String;
++		prop.writeType = vr::PropertyWrite_Set;
++		prop.unTag = vr::k_unStringPropertyTag;
++		prop.pvBuffer = const_cast<char *>(serial);
++		prop.unBufferSize = std::strlen(serial) + 1;
++		std::lock_guard lock(context->devices_mut);
++		device.handle_properties(&prop, 1);
++	};
++	write("receiver-A");
++	CHECK(device.get_lighthouse_calibration(&device, receiver, &offset));
++	CHECK(std::strcmp(receiver, "receiver-A") == 0);
++	write("receiver-B");
++	CHECK(device.get_lighthouse_calibration(&device, receiver, &offset));
++	CHECK(std::strcmp(receiver, "receiver-B") == 0);
++	// A real nonidentity grip offset must be supplied for IMU frame conversion.
++	const InputClass index{XRT_DEVICE_INDEX_CONTROLLER, {XRT_INPUT_INDEX_GRIP_POSE}, {}};
++	device.calibration_profile(&index);
++	device.device_type = XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER;
++	CHECK(device.get_lighthouse_calibration(&device, receiver, &offset));
++	CHECK(std::abs(offset.position.x) + std::abs(offset.position.y) + std::abs(offset.position.z) > .001f);
++	context->stop_frame_thread();
++}
+ void
+ device_history_test()
+ {
+@@ -325,6 +363,7 @@
+ main(int argc, char **argv)
+ {
+ 	if (argc == 1) {
++		calibration_metadata_test();
+ 		multi_device_frames_test();
+ 		tests();
+ 		device_history_test();
