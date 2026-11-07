@@ -1,0 +1,101 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] d/steamvr_lh: load the QuestLHSync relationship companion
+
+Load the optional v1 relationship-averaging companion before provider Init.
+Stop it only after Cleanup joins the Valve callback threads. The companion
+uses QuestLHSync's existing averaging and hook implementation, avoiding a
+second implementation of the estimator or filtering corrected device poses.
+LH_RELATIONS_LIBRARY and LH_RELATIONS_DATA_DIR explicitly select the library
+and its persistent data folder. No companion is loaded by default.
+
+diff --git a/src/xrt/drivers/steamvr_lh/interfaces/context.hpp b/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
+--- a/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
++++ b/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
+@@ -193,6 +193,10 @@
+ 
+ public:
+ 	~Context();
++	//! Optional QuestLHSync averaging companion, owned for this driver's lifetime.
++	void *relations_library{nullptr};
++	void *relations_handle{nullptr};
++	void (*relations_stop)(void *){nullptr};
+ 
+ 	[[nodiscard]] static std::shared_ptr<Context>
+ 	create(const std::string &steam_install,
+diff --git a/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp b/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
+--- a/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
++++ b/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
+@@ -157,6 +157,32 @@
+ 	std::strncpy(c->name, "SteamVR Lighthouse Tracking", XRT_TRACKING_NAME_LEN);
+ 	c->type = XRT_TRACKING_TYPE_LIGHTHOUSE;
+ 	c->initial_offset = XRT_POSE_IDENTITY;
++	// Relationship measurements must be averaged inside the process hosting
++	// Valve's driver, before its provider starts any callback threads.
++	const char *library = getenv("LH_RELATIONS_LIBRARY");
++	const char *directory = getenv("LH_RELATIONS_DATA_DIR");
++	if (library && *library) {
++		if (!directory || !*directory) {
++			U_LOG_W("LH_RELATIONS_LIBRARY requires LH_RELATIONS_DATA_DIR: averaging disabled");
++		} else {
++			c->relations_library = dlopen(library, RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
++			if (!c->relations_library) {
++				U_LOG_W("Cannot load Lighthouse relationship companion: %s", dlerror());
++			} else {
++				using Start = void *(*)(const char *, void (*)(const char *));
++				auto start = reinterpret_cast<Start>(dlsym(c->relations_library, "qlhs_relations_start_v1"));
++				c->relations_stop = reinterpret_cast<void (*)(void *)>(
++				    dlsym(c->relations_library, "qlhs_relations_stop_v1"));
++				if (start && c->relations_stop) {
++					c->relations_handle = start(directory, [](const char *message) { U_LOG_I("%s", message); });
++					if (!c->relations_handle)
++						U_LOG_W("Lighthouse relationship companion could not enable averaging");
++				} else {
++					U_LOG_W("Lighthouse relationship companion has an unsupported ABI");
++				}
++			}
++		}
++	}
+ 	for (vr::IServerTrackedDeviceProvider *const &driver : c->providers) {
+ 		vr::EVRInitError err = driver->Init(c.get());
+ 		if (err != vr::VRInitError_None) {
+@@ -199,6 +225,10 @@
+ 	for (vr::IServerTrackedDeviceProvider *const &provider : providers)
+ 		provider->Cleanup();
+ 	// Cleanup has joined the driver's callback threads.
++	if (relations_handle && relations_stop)
++		relations_stop(relations_handle);
++	if (relations_library)
++		dlclose(relations_library);
+ 	for (auto &reference : references)
+ 		reference.reset();
+ }
+diff --git a/tests/tests_steamvr_lh_stabilization.cpp b/tests/tests_steamvr_lh_stabilization.cpp
+--- a/tests/tests_steamvr_lh_stabilization.cpp
++++ b/tests/tests_steamvr_lh_stabilization.cpp
+@@ -231,6 +231,18 @@
+ 	CHECK(device.get_lighthouse_calibration(&device, receiver, &offset));
+ 	CHECK(std::abs(offset.position.x) + std::abs(offset.position.y) + std::abs(offset.position.z) > .001f);
+ 	context->stop_frame_thread();
++}
++void
++relations_companion_test()
++{
++	// Optional integration test with QuestLHSync's real companion and ELF fixture.
++	if (!getenv("LH_RELATIONS_TEST_EXPECT_ACTIVE"))
++		return;
++	for (int i = 0; i < 2; ++i) {
++		auto context = Context::create("/nonexistent-lh-test", "/nonexistent-lh-test", {});
++		CHECK(context && context->relations_handle && context->relations_stop);
++		context.reset(); // Cleanup must stop the companion so the next start succeeds.
++	}
+ }
+ void
+ device_history_test()
+@@ -363,6 +375,7 @@
+ main(int argc, char **argv)
+ {
+ 	if (argc == 1) {
++		relations_companion_test();
+ 		calibration_metadata_test();
+ 		multi_device_frames_test();
+ 		tests();
