@@ -272,6 +272,10 @@ void start_server(configuration config)
 
 		// Snapshot for this runtime only. Dashboard/config OFF overrides inherited env.
 		setenv("LH_STABILIZE_REFERENCE_SERIAL", config.lighthouse_reference_serial.c_str(), true);
+		// Either the dashboard setting or an inherited LH_AVERAGE_RELATIONSHIPS=0
+		// can disable averaging. Enabling in the UI does not override the environment.
+		if (!config.lh_average_relationships)
+			setenv("LH_AVERAGE_RELATIONSHIPS", "0", true);
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 		steamvr_lh_set_reference_callback([](const char * serial) {
 			try

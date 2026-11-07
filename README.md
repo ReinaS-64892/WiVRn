@@ -55,6 +55,21 @@ The Flatpak contains both xrizer and OpenComposite.
 
 Note that due to Flatpak sandboxing, some features such as support for SteamVR tracked (Lighthouse) devices, or virtual gamepad/keyboard/input devices forwarded from the headset, may not be available.
 
+### Lighthouse base station averaging
+
+The companion Monado patches implement base station relationship averaging in the `steamvr_lh` driver itself.
+It is enabled by default on supported x86-64 Valve Lighthouse drivers and requires no QuestLHSync companion
+library or launcher. Disable **Average base station relationships** in Dashboard's settings, or set
+`"lh-average-relationships": false` in the WiVRn configuration. Reconnect the headset to apply changes.
+Starting the dashboard/server with `LH_AVERAGE_RELATIONSHIPS=0` also disables averaging, even when the saved
+setting is enabled. Standalone Monado uses the same environment variable.
+
+The driver averages up to 30 measurements per station pair, rejects isolated outliers, and starts a new average
+when two measurements agree that a station moved. It persists its estimates in
+`Steam/config/lighthouse/monado-relations.json`. Unsupported Valve driver versions leave averaging disabled
+and log the reason. This changes base station placement inside Lighthouse tracking; it does not smooth tracker
+poses or change tracking-origin offsets.
+
 ## Headset Client/App
 
 Follow the wizard in the PC dashboard to install the client on your VR headset.
