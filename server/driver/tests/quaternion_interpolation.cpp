@@ -48,5 +48,31 @@ int main()
 			check((velocity - axis).norm() < 0.01f);
 		}
 	}
+	for (bool replace: {false, true})
+	{
+		Interpolator consistent, alternating;
+		for (int i = 0; i < 10; ++i)
+		{
+			auto s = sample(i, Eigen::Vector3f::UnitY());
+			consistent.add_sample(s);
+			if (replace)
+				alternating.add_sample(s);
+			if (i % 2)
+			{
+				*s.y *= -1;
+				*s.dy *= -1;
+			}
+			// Replacement and insertion must align the derivative with q.
+			++s.production_timestamp;
+			alternating.add_sample(s);
+			for (XrDuration dt: {XrDuration{0}, XrDuration{20'000'000}})
+			{
+				auto a = consistent.get_at(s.timestamp + dt), b = alternating.get_at(s.timestamp + dt);
+				check(a.y && b.y && a.dy && b.dy);
+				check((*a.y - *b.y).norm() < 1e-5f);
+				check((*a.dy - *b.dy).norm() < 1e-4f);
+			}
+		}
+	}
 	std::cout << "Quaternion interpolation tests passed\n";
 }
