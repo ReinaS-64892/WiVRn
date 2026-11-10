@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "lighthouse_recording.h"
 #include "lighthouse_native_validation.h"
-#if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE || WIVRN_FEATURE_SURVIVE
+#if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE || WIVRN_FEATURE_SURVIVE || WIVRN_FEATURE_OPENHOUSE
 #include <nlohmann/json.hpp>
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 #include "lighthouse_capture.h"
@@ -11,6 +11,9 @@
 #if WIVRN_FEATURE_SURVIVE
 #include "lighthouse_build_provenance.h"
 #include "survive_recording.h"
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+#include "openhouse_reference_recorder.hpp"
 #endif
 #include <array>
 #include <atomic>
@@ -804,6 +807,9 @@ void set_test_capture_factory(capture_factory factory)
 }
 } // namespace lighthouse
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+std::filesystem::path openhouse_recording_directory;
+#endif
 void start_lighthouse_recording(const configuration & snapshot) noexcept
 {
 	// Dashboard settings are the sole public trigger, read once for this Monado lifetime.
@@ -833,7 +839,17 @@ void start_lighthouse_recording(const configuration & snapshot) noexcept
 		// Internal handoff to the Monado component. No external environment opt-in or helper program.
 		setenv("LH_RECORDER_OUTPUT", directory.c_str(), true);
 		setenv("LH_RECORDER_ENABLE", "1", true);
-		if (snapshot.selected_lighthouse_backend() == lighthouse_backend::survive)
+		if (snapshot.selected_lighthouse_backend() == lighthouse_backend::openhouse)
+		{
+#if WIVRN_FEATURE_OPENHOUSE
+			openhouse_recording_directory = directory;
+			setenv("LH_CAPTURE", (directory / "input.lhraw").c_str(), true);
+			openhouse_reference::initialize();
+			save(directory / "manifest.json", {{"schema_version", 1}, {"source", "openhouse"},
+			     {"raw_input", "input.lhraw"}, {"status", "recording"}});
+#endif
+		}
+		else if (snapshot.selected_lighthouse_backend() == lighthouse_backend::survive)
 		{
 #if WIVRN_FEATURE_SURVIVE
 			survive_recording_session = std::make_unique<survive_session>(directory, snapshot);
@@ -854,6 +870,25 @@ void start_lighthouse_recording(const configuration & snapshot) noexcept
 }
 void stop_lighthouse_recording(int exit_status) noexcept
 {
+#if WIVRN_FEATURE_OPENHOUSE
+	openhouse_reference::finish();
+	if (!openhouse_recording_directory.empty())
+	{
+		try
+		{
+			auto raw = openhouse_recording_directory / "input.lhraw";
+			const bool recorded = std::filesystem::exists(raw) && std::filesystem::file_size(raw) > 0;
+			save(openhouse_recording_directory / "manifest.json", {{"schema_version", 1},
+			     {"source", "openhouse"}, {"raw_input", "input.lhraw"}, {"exit_status", exit_status},
+			     {"status", exit_status == 0 && recorded ? "complete" : "abnormal"}});
+		}
+		catch (const std::exception & e)
+		{
+			std::cerr << "Cannot finalize openhouse recording: " << e.what() << '\n';
+		}
+		openhouse_recording_directory.clear();
+	}
+#endif
 #if WIVRN_FEATURE_SURVIVE
 	if (survive_recording_session)
 		survive_recording_session->finish(exit_status);

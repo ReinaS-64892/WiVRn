@@ -92,10 +92,21 @@ set(XRT_IPC_MSG_SOCK_FILENAME     "wivrn/comp_ipc" CACHE STRING "Service socket 
 set(XRT_IPC_SERVICE_PID_FILENAME  "wivrn.pid"      CACHE STRING "Service pidfile filename")
 set(XRT_OXR_RUNTIME_SUFFIX        "wivrn"          CACHE STRING "OpenXR client library suffix")
 
+# The copied OpenVR host also uses Vive Pro 2 support when SteamVR is disabled.
+if(WIVRN_FEATURE_OPENHOUSE)
+    set(XRT_BUILD_DRIVER_OPENHOUSE ON)
+endif()
+if(WIVRN_FEATURE_SURVIVE)
+    add_subdirectory(survive)
+    FetchContent_GetProperties(libsurvive)
+endif()
 FetchContent_MakeAvailable(monado)
+if(WIVRN_FEATURE_OPENHOUSE AND WIVRN_BUILD_SERVER)
+    add_subdirectory(openhouse)
+endif()
 
 if(WIVRN_FEATURE_SURVIVE AND NOT TARGET drv_survive)
-	message(FATAL_ERROR "WIVRN_FEATURE_SURVIVE requires system libsurvive (pkg-config package 'survive')")
+	message(FATAL_ERROR "WIVRN_FEATURE_SURVIVE requires the bundled libsurvive driver")
 endif()
 
 if (WIVRN_BUILD_SERVER)
@@ -161,6 +172,10 @@ if (WIVRN_BUILD_SERVER)
 	if (WIVRN_FEATURE_STEAMVR_LIGHTHOUSE)
 		target_include_directories(wivrn-server SYSTEM PRIVATE ${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh/)
 		target_link_libraries(wivrn-server PRIVATE drv_steamvr_lh)
+	endif()
+
+	if(WIVRN_FEATURE_OPENHOUSE)
+		target_link_libraries(wivrn-server PRIVATE drv_openhouse)
 	endif()
 
 	if (WIVRN_FEATURE_SURVIVE)
@@ -298,6 +313,7 @@ if (WIVRN_BUILD_SERVER)
 		RENAME wivrn.xml
 		DESTINATION lib/firewalld/services)
 
+	set_property(TARGET wivrn-server APPEND PROPERTY INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
 	install(TARGETS wivrn-server)
 endif()
 
@@ -360,9 +376,8 @@ if(WIVRN_BUILD_SERVER)
 	if(WIVRN_FEATURE_SURVIVE)
 		find_package(ZLIB REQUIRED)
 		find_package(Python3 REQUIRED COMPONENTS Interpreter)
-		get_filename_component(LH_SURVIVE_DEPENDENCIES "${SURVIVE_PREFIX}" DIRECTORY)
 		execute_process(COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/lh-recorder/build_provenance.py"
-			"${PROJECT_SOURCE_DIR}" "${monado_SOURCE_DIR}" "${LH_SURVIVE_DEPENDENCIES}/libsurvive-llfa-main-src"
+			"${PROJECT_SOURCE_DIR}" "${monado_SOURCE_DIR}" "${libsurvive_SOURCE_DIR}"
 			"${CMAKE_CURRENT_BINARY_DIR}/lighthouse_build_provenance.h" COMMAND_ERROR_IS_FATAL ANY)
 		target_include_directories(wivrn-server PRIVATE "${monado_SOURCE_DIR}/src/xrt/drivers/survive" "${CMAKE_CURRENT_BINARY_DIR}")
 		target_link_libraries(wivrn-server PRIVATE drv_survive ZLIB::ZLIB)
@@ -392,6 +407,10 @@ if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER AND WIVRN_FEATURE_STEAMVR_LIGHTHOUSE)
         target_link_libraries(lh-recording-startup-test PRIVATE drv_survive)
     endif()
 
+    if(WIVRN_FEATURE_OPENHOUSE)
+        target_link_libraries(lh-recording-startup-test PRIVATE drv_openhouse)
+    endif()
+
     add_executable(lh-hotplug-test ../tools/lh-recorder/tests/hotplug.cpp)
     target_compile_features(lh-hotplug-test PRIVATE cxx_std_20)
     set_target_properties(lh-hotplug-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
@@ -400,11 +419,10 @@ if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER AND WIVRN_FEATURE_STEAMVR_LIGHTHOUSE)
 endif()
 
 if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER AND WIVRN_FEATURE_SURVIVE)
-    pkg_check_modules(LH_SURVIVE REQUIRED IMPORTED_TARGET survive)
     add_executable(lh-survive-hotplug-test ../tools/lh-recorder/tests/survive_hotplug.cpp)
     set_target_properties(lh-survive-hotplug-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
     target_include_directories(lh-survive-hotplug-test PRIVATE ${monado_SOURCE_DIR}/src/xrt/drivers/survive ${monado_SOURCE_DIR}/src/xrt/drivers)
-    target_link_libraries(lh-survive-hotplug-test PRIVATE drv_survive aux_util xrt-interfaces PkgConfig::LH_SURVIVE)
+    target_link_libraries(lh-survive-hotplug-test PRIVATE drv_survive aux_util xrt-interfaces wivrn-survive)
 endif()
 
 if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER)

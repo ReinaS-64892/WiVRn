@@ -153,7 +153,8 @@ lighthouse_backend configuration::selected_lighthouse_backend() const
 {
 	return select_lighthouse_backend(use_steamvr_lh || std::getenv("WIVRN_USE_STEAMVR_LH"),
 	                                use_survive || std::getenv("WIVRN_USE_SURVIVE"),
-	                                WIVRN_FEATURE_STEAMVR_LIGHTHOUSE, WIVRN_FEATURE_SURVIVE);
+	                                WIVRN_FEATURE_STEAMVR_LIGHTHOUSE, WIVRN_FEATURE_SURVIVE,
+	                                use_openhouse || std::getenv("WIVRN_USE_OPENHOUSE"), WIVRN_FEATURE_OPENHOUSE);
 }
 
 configuration::configuration()
@@ -210,6 +211,9 @@ configuration::configuration()
 
 		if (auto it = json.find("use-survive"); it != json.end() && it->is_boolean())
 			use_survive = *it;
+
+		if (auto it = json.find("use-openhouse"); it != json.end() && it->is_boolean())
+			use_openhouse = *it;
 
 		if (auto it = json.find("lighthouse-reference-serial"); it != json.end() && it->is_string())
 		{

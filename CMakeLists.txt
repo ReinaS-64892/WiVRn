@@ -83,6 +83,7 @@ option(WIVRN_FEATURE_RENDERDOC "Support renderdoc" OFF)
 option(WIVRN_FEATURE_SOLARXR "Enable SolarXR driver" ON)
 option(WIVRN_FEATURE_STEAMVR_LIGHTHOUSE "Enable SteamVR Lighthouse driver" ON)
 option(WIVRN_FEATURE_SURVIVE "Enable libsurvive Lighthouse driver" OFF)
+option(WIVRN_FEATURE_OPENHOUSE "Enable the bundled openhouse Lighthouse driver" ON)
 
 set(WIVRN_CSS "${CMAKE_SOURCE_DIR}/images/wivrn-local.css" CACHE STRING "Stylesheet to use to render SVGs" )
 
@@ -287,6 +288,24 @@ FetchContent_Declare(monado
     # The flatpak manifest is updated automatically
     GIT_TAG          ${MONADO_REV}
     PATCH_COMMAND    ${CMAKE_CURRENT_LIST_DIR}/patches/apply.sh ${MONADO_PATCHES}
+    EXCLUDE_FROM_ALL
+)
+
+# Independently updateable, pinned tracking provider (override with
+# FETCHCONTENT_SOURCE_DIR_OPENHOUSE for local development).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS openhouse-rev)
+file(STRINGS openhouse-rev OPENHOUSE_REV)
+FetchContent_Declare(openhouse
+    GIT_REPOSITORY https://github.com/YusufOzmen01/openhouse.git
+    GIT_TAG ${OPENHOUSE_REV}
+    EXCLUDE_FROM_ALL
+)
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS libsurvive-rev)
+file(STRINGS libsurvive-rev LIBSURVIVE_REV)
+FetchContent_Declare(libsurvive
+    GIT_REPOSITORY https://github.com/LLFA-Link-Project/libsurvive.git
+    GIT_TAG ${LIBSURVIVE_REV}
     EXCLUDE_FROM_ALL
 )
 

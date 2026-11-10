@@ -91,6 +91,21 @@ int main(int argc, char ** argv)
 	require(a.lighthouseBackend() == "survive");
 	a.restore_defaults();
 	require(a.lighthouseBackend() == "none");
+	a.set_lighthouseBackend("openhouse");
+	require(a.useOpenhouse() && !a.useSurvive() && !a.steamVrLh());
+	b.loadJson(a.saveJson());
+	require(b.lighthouseBackend() == "openhouse");
+	b.set_lighthouseBackend("survive");
+	require(!b.useOpenhouse() && b.useSurvive());
+	a.loadJson(b.saveJson());
+	require(a.lighthouseBackend() == "survive");
+	a.set_useOpenhouse(true);
+	a.set_steamVrLh(true);
+	require(a.steamVrLh() && !a.useOpenhouse());
+	a.loadJson(R"({"use-openhouse":true,"use-survive":true,"use-steamvr-lh":true})");
+	require(a.lighthouseBackend() == "openhouse");
+	a.restore_defaults();
+	require(a.lighthouseBackend() == "none" && !a.saveJson().contains("use-openhouse"));
 	// Both Lighthouse backends retain the same clamp across switching/reload.
 	a.loadJson("{}");
 	require(a.lhMaxExtrapolationEnabled() && a.lhMaxExtrapolation() == 50);

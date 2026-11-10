@@ -26,6 +26,10 @@ int main()
 	require(select_lighthouse_backend(true, true, false, false) == none);
 	unsetenv("WIVRN_USE_STEAMVR_LH");
 	unsetenv("WIVRN_USE_SURVIVE");
+	unsetenv("WIVRN_USE_OPENHOUSE");
+	require(select_lighthouse_backend(true, true, true, true, true, true) == openhouse);
+	require(select_lighthouse_backend(true, true, true, true, true, false) == survive);
+	require(select_lighthouse_backend(false, false, false, false, true, true) == openhouse);
 	char directory[] = "/tmp/wivrn-backend-test-XXXXXX";
 	require(mkdtemp(directory) != nullptr);
 	auto path = std::filesystem::path(directory) / "config.json";
@@ -45,6 +49,15 @@ int main()
 	require(load(R"({"use-steamvr-lh":true,"use-survive":false})") == built_steamvr);
 	require(load(R"({"use-steamvr-lh":false,"use-survive":true})") == built_survive);
 	require(load(R"({"use-steamvr-lh":false,"use-survive":false})") == none);
+	const auto built_openhouse = WIVRN_FEATURE_OPENHOUSE ? openhouse : none;
+	require(load(R"({"use-openhouse":true})") == built_openhouse);
+	require(load(R"({"use-steamvr-lh":true,"use-survive":true,"use-openhouse":true})") ==
+	        select_lighthouse_backend(true, true, WIVRN_FEATURE_STEAMVR_LIGHTHOUSE, WIVRN_FEATURE_SURVIVE, true, WIVRN_FEATURE_OPENHOUSE));
+	require(load(R"({"use-openhouse":"invalid"})") == none);
+	require(load(R"({"use-openhouse":false})") == none);
+	setenv("WIVRN_USE_OPENHOUSE", "1", true);
+	require(load("{}") == built_openhouse);
+	unsetenv("WIVRN_USE_OPENHOUSE");
 	setenv("WIVRN_USE_STEAMVR_LH", "1", true);
 	require(load("{}") == built_steamvr);
 	setenv("WIVRN_USE_SURVIVE", "1", true);

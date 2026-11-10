@@ -1,0 +1,4 @@
+{
+    global: wivrn_openhouse_factory;
+    local: *;
+};

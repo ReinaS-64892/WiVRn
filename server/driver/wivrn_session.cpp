@@ -64,6 +64,9 @@
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 #include "steamvr_lh_interface.h"
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+#include "openhouse_interface.h"
+#endif
 
 #if WIVRN_FEATURE_SURVIVE
 #include "survive_interface.h"
@@ -161,6 +164,17 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 		U_LOG_W("If getting a SIGSEGV right after this, you are likely using an unsupported SteamVR version!");
 		U_LOG_W("=====================");
 		lighthouse_enabled = steamvr_lh_create_devices(nullptr, this) == XRT_SUCCESS;
+	}
+#endif
+
+#if WIVRN_FEATURE_OPENHOUSE
+	if (lighthouse_backend_choice == lighthouse_backend::openhouse)
+	{
+		if (conf.lh_stick_deadzone > 0.01f)
+			setenv("LH_STICK_DEADZONE", std::format("{:.2}", *conf.lh_stick_deadzone).c_str(), true);
+		openhouse_enabled = openhouse_create_devices(nullptr, this) == XRT_SUCCESS;
+		if (!openhouse_enabled)
+			U_LOG_W("Failed to initialize openhouse backend");
 	}
 #endif
 
@@ -264,6 +278,10 @@ wivrn_session::~wivrn_session()
 	if (lighthouse_enabled)
 		steamvr_lh_stop(this);
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (openhouse_enabled)
+		openhouse_stop(this);
+#endif
 #if WIVRN_FEATURE_SOLARXR
 	solarxr_device_clear_feeder_devices(static_roles.body);
 #endif
@@ -341,6 +359,10 @@ xrt_result_t wivrn::wivrn_session::create_session(std::unique_ptr<wivrn_connecti
 	if (self->lighthouse_enabled)
 		steamvr_lh_set_device_added_callback(self.get(), &wivrn_session::lighthouse_device_added, self.get());
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (self->openhouse_enabled)
+		openhouse_set_device_added_callback(self.get(), &wivrn_session::lighthouse_device_added, self.get());
+#endif
 
 	if (self->eye_tracker)
 	{
@@ -378,6 +400,10 @@ void wivrn_session::stop()
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 	if (lighthouse_enabled)
 		steamvr_lh_stop(this);
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (openhouse_enabled)
+		openhouse_stop(this);
 #endif
 	net_thread = std::jthread();
 	worker_thread = std::jthread();
@@ -1449,6 +1475,10 @@ xrt_result_t wivrn_session::get_roles(xrt_system_roles * out_roles)
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 	if (lighthouse_enabled)
 		steamvr_lh_get_roles(this, &lighthouse_roles);
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (openhouse_enabled)
+		openhouse_get_roles(this, &lighthouse_roles);
 #endif
 	std::lock_guard lock(roles_mutex);
 	auto selected = roles;

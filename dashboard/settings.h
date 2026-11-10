@@ -85,6 +85,8 @@ public:
 	Q_PROPERTY(QString lighthouseBackend READ lighthouseBackend WRITE set_lighthouseBackend NOTIFY lighthouseBackendChanged)
 	Q_PROPERTY(bool useSurvive READ useSurvive WRITE set_useSurvive NOTIFY useSurviveChanged)
 	Q_PROPERTY(bool survive_supported READ survive CONSTANT)
+	Q_PROPERTY(bool openhouse_supported READ openhouse CONSTANT)
+	Q_PROPERTY(bool useOpenhouse READ useOpenhouse WRITE set_useOpenhouse NOTIFY useOpenhouseChanged)
 	Q_PROPERTY(bool steamVrLh READ steamVrLh WRITE set_steamVrLh NOTIFY steamVrLhChanged)
 	Q_PROPERTY(bool lhMaxExtrapolationEnabled READ lhMaxExtrapolationEnabled NOTIFY lhMaxExtrapolationEnabledChanged)
 	Q_PROPERTY(int64_t lhMaxExtrapolation READ lhMaxExtrapolation WRITE set_lhMaxExtrapolation NOTIFY lhMaxExtrapolationChanged)
@@ -105,6 +107,7 @@ public:
 	SETTER_GETTER_NOTIFY(bool, debugGui)
 	SETTER_GETTER_NOTIFY(bool, steamVrLh)
 	SETTER_GETTER_NOTIFY(bool, useSurvive)
+	SETTER_GETTER_NOTIFY(bool, useOpenhouse)
 	SETTER_GETTER_NOTIFY(QString, lighthouseBackend)
 	SETTER_GETTER_NOTIFY(bool, lighthouseRecordingEnabled)
 	SETTER_GETTER_NOTIFY(QString, lighthouseRecordingOutput)
@@ -142,6 +145,7 @@ public:
 	bool debug_gui() const;
 	bool steamvr_lh() const;
 	bool survive() const;
+	bool openhouse() const;
 	bool hid_forwarding() const;
 
 	static encoder_name encoder_id_from_string(std::string_view s);

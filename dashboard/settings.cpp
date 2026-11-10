@@ -126,6 +126,7 @@ void Settings::emitAllChanged()
 	debugGuiChanged();
 	steamVrLhChanged();
 	useSurviveChanged();
+	useOpenhouseChanged();
 	lighthouseBackendChanged();
 	lighthouseRecordingEnabledChanged();
 	lighthouseRecordingOutputChanged();
@@ -455,29 +456,57 @@ void Settings::set_useSurvive(const bool & value)
 	}
 }
 
+bool Settings::useOpenhouse() const
+{
+	auto it = m_jsonSettings.find("use-openhouse");
+	return it != m_jsonSettings.end() && it->is_boolean() && it->get<bool>();
+}
+
+void Settings::set_useOpenhouse(const bool & value)
+{
+	if (value)
+		set_lighthouseBackend("openhouse");
+	else if (useOpenhouse())
+	{
+		m_jsonSettings["use-openhouse"] = false;
+		useOpenhouseChanged();
+		lighthouseBackendChanged();
+	}
+}
+
+bool Settings::openhouse() const
+{
+	return WIVRN_FEATURE_OPENHOUSE;
+}
+
 QString Settings::lighthouseBackend() const
 {
-	switch (wivrn::select_lighthouse_backend(steamVrLh(), useSurvive(), true, true))
+	switch (wivrn::select_lighthouse_backend(steamVrLh(), useSurvive(), true, true, useOpenhouse(), true))
 	{
 		case wivrn::lighthouse_backend::steamvr: return "steamvr";
 		case wivrn::lighthouse_backend::survive: return "survive";
+		case wivrn::lighthouse_backend::openhouse: return "openhouse";
 		default: return "none";
 	}
 }
 
 void Settings::set_lighthouseBackend(const QString & value)
 {
-	if (value != "none" && value != "steamvr" && value != "survive")
+	if (value != "none" && value != "steamvr" && value != "survive" && value != "openhouse")
 		return;
 	auto old_backend = lighthouseBackend();
 	auto old_steamvr = steamVrLh();
 	auto old_survive = useSurvive();
+	auto old_openhouse = useOpenhouse();
 	m_jsonSettings["use-steamvr-lh"] = value == "steamvr";
 	m_jsonSettings["use-survive"] = value == "survive";
+	m_jsonSettings["use-openhouse"] = value == "openhouse";
 	if (old_steamvr != steamVrLh())
 		steamVrLhChanged();
 	if (old_survive != useSurvive())
 		useSurviveChanged();
+	if (old_openhouse != useOpenhouse())
+		useOpenhouseChanged();
 	if (old_backend != lighthouseBackend())
 		lighthouseBackendChanged();
 }
@@ -746,6 +775,7 @@ void Settings::restore_defaults()
 	m_jsonSettings.erase("debug-gui");
 	m_jsonSettings.erase("use-steamvr-lh");
 	m_jsonSettings.erase("use-survive");
+	m_jsonSettings.erase("use-openhouse");
 	m_jsonSettings.erase("lighthouse-recording");
 	m_jsonSettings.erase("lh-stick-deadzone");
 	m_jsonSettings.erase("lh-max-extrapolation");

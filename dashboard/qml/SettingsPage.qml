@@ -15,6 +15,12 @@ Kirigami.ScrollablePage {
 
     flickable.interactive: false // Make sure the Kirigami.ScrollablePage does not eat the vertical mouse dragging events
 
+    readonly property bool openvrLighthouseSelected:
+        (Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr") ||
+        (Settings.openhouse_supported && lighthouse_backend.currentValue === "openhouse")
+    readonly property bool lighthouseSelected: openvrLighthouseSelected ||
+        (Settings.survive_supported && lighthouse_backend.currentValue === "survive")
+
     property bool allowUpdates: false // ignore onXXX events until document is loaded
 
     ColumnLayout {
@@ -124,7 +130,7 @@ Kirigami.ScrollablePage {
             }
             Controls.ComboBox {
                 id: lighthouse_backend
-                visible: Settings.steamvr_lh_supported || Settings.survive_supported
+                visible: Settings.steamvr_lh_supported || Settings.survive_supported || Settings.openhouse_supported
                 Layout.fillWidth: true
                 Kirigami.FormData.label: i18n("Lighthouse backend:")
                 textRole: "text"
@@ -135,6 +141,8 @@ Kirigami.ScrollablePage {
                         backends.push({text: "SteamVR (steamvr_lh)", value: "steamvr"});
                     if (Settings.survive_supported)
                         backends.push({text: "libsurvive", value: "survive"});
+                    if (Settings.openhouse_supported)
+                        backends.push({text: "openhouse", value: "openhouse"});
                     return backends;
                 }
             }
@@ -146,12 +154,12 @@ Kirigami.ScrollablePage {
             }
             Controls.CheckBox {
                 id: lighthouse_stabilization_enabled
-                visible: Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr"
+                visible: settings.openvrLighthouseSelected
                 text: i18n("Use a base station as tracking origin (experimental)")
             }
             Controls.ComboBox {
                 id: lighthouse_reference_serial
-                visible: Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr"
+                visible: settings.openvrLighthouseSelected
                 enabled: lighthouse_stabilization_enabled.checked
                 editable: true
                 Layout.fillWidth: true
@@ -160,23 +168,23 @@ Kirigami.ScrollablePage {
                 validator: RegularExpressionValidator { regularExpression: /[!-~]{0,255}/ }
             }
             Controls.Label {
-                visible: Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr"
+                visible: settings.openvrLighthouseSelected
                 text: i18n("Select a remembered base station or enter its serial. Reconnect the headset to apply. Calibrate again after enabling or changing the reference base station.")
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
             Controls.Label {
-                visible: (Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr") || (Settings.survive_supported && lighthouse_backend.currentValue === "survive")
+                visible: settings.lighthouseSelected
                 text: i18n("Lighthouse Recording")
                 font.bold: true
             }
             Controls.CheckBox {
                 id: lighthouse_recording_enabled
-                visible: (Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr") || (Settings.survive_supported && lighthouse_backend.currentValue === "survive")
+                visible: settings.lighthouseSelected
                 text: i18n("Enable recording")
             }
             RowLayout {
-                visible: (Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr") || (Settings.survive_supported && lighthouse_backend.currentValue === "survive")
+                visible: settings.lighthouseSelected
                 Kirigami.FormData.label: i18n("Output directory:")
                 Controls.TextField {
                     id: lighthouse_recording_output
@@ -188,18 +196,18 @@ Kirigami.ScrollablePage {
                 }
             }
             Controls.Label {
-                visible: (Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr") || (Settings.survive_supported && lighthouse_backend.currentValue === "survive")
+                visible: settings.lighthouseSelected
                 text: i18n("Changes take effect the next time Monado starts.")
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
             Controls.CheckBox {
                 id: lh_max_extrapolation_enabled
-                visible: lighthouse_backend.currentValue === "steamvr" || lighthouse_backend.currentValue === "survive"
+                visible: settings.lighthouseSelected
                 text: i18n("Clamp extrapolation for Lighthouse tracked devices")
             }
             RowLayout {
-                visible: (lighthouse_backend.currentValue === "steamvr" || lighthouse_backend.currentValue === "survive") && lh_max_extrapolation_enabled.checked
+                visible: settings.lighthouseSelected && lh_max_extrapolation_enabled.checked
                 Kirigami.FormData.label: i18n("Lighthouse max pose extrapolation")
                 Controls.Slider {
                     id: lh_max_extrapolation
@@ -219,8 +227,8 @@ Kirigami.ScrollablePage {
                 }
             }
             RowLayout {
-                visible: Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr"
-                Kirigami.FormData.label: i18n("SteamVR joystick deadzone")
+                visible: settings.openvrLighthouseSelected
+                Kirigami.FormData.label: i18n("Lighthouse joystick deadzone")
                 Controls.Slider {
                     id: lh_stick_deadzone
                     Layout.fillWidth: true

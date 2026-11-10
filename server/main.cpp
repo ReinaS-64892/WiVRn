@@ -46,6 +46,9 @@
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 #include "steamvr_lh_interface.h"
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+#include "openhouse_interface.h"
+#endif
 #include "wivrn_ipc.h"
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
@@ -274,6 +277,19 @@ void start_server(configuration config)
 		setenv("LH_STABILIZE_REFERENCE_SERIAL", config.lighthouse_reference_serial.c_str(), true);
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 		steamvr_lh_set_reference_callback([](const char * serial) {
+			try
+			{
+				if (serial && wivrn::valid_lighthouse_serial(serial))
+					send_to_main(from_monado::lighthouse_reference{serial});
+			}
+			catch (const std::exception & e)
+			{
+				std::cerr << "Cannot report Lighthouse base station: " << e.what() << '\n';
+			}
+		});
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+		openhouse_set_reference_callback([](const char * serial) {
 			try
 			{
 				if (serial && wivrn::valid_lighthouse_serial(serial))

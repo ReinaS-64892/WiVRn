@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenAI Codex <codex@openai.com>
+Date: Tue, 10 Nov 2026 16:00:00 +0900
+Subject: [PATCH] drivers: build Vive helpers for the openhouse OpenVR host
+
+WiVRn copies the patched steamvr_lh host in its build tree. Build its
+shared Vive helpers even when the original host and libsurvive are disabled.
+
+--- a/src/xrt/drivers/CMakeLists.txt
++++ b/src/xrt/drivers/CMakeLists.txt
+@@ -624,7 +624,7 @@
+ 	list(APPEND ENABLED_HEADSET_DRIVERS svr)
+ endif()
+ 
+-if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE OR XRT_BUILD_DRIVER_SURVIVE)
++if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE OR XRT_BUILD_DRIVER_SURVIVE OR XRT_BUILD_DRIVER_OPENHOUSE)
+ 	add_library(drv_vp2 STATIC vp2/vp2_hid.c vp2/vp2_hid.h vp2/vp2_config.cpp vp2/vp2_config.h)
+ 	target_link_libraries(
+ 		drv_vp2

@@ -323,4 +323,5 @@ int main(int argc, char ** argv)
 		xrt_device_destroy(&device);
 	ctx.reset();
 	std::puts("Lighthouse hotplug tests passed");
+	return 0;
 }

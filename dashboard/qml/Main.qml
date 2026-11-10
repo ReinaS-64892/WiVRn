@@ -364,7 +364,7 @@ Kirigami.ApplicationWindow {
                         Kirigami.FormData.label: i18n("Lighthouse trackers")
                         text: i18n("Turn off all trackers")
                         icon.name: "system-shutdown-symbolic"
-                        visible: Settings.steamvr_lh_supported
+                        visible: Settings.steamvr_lh_supported || Settings.openhouse_supported
                         enabled: root.server_started && WivrnServer.sessionRunning
                         onClicked: WivrnServer.standby_lighthouse_trackers()
                         Controls.ToolTip.visible: hovered

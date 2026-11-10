@@ -66,6 +66,27 @@ timestamps, rejection of stale coordinates, and pose recovery after reconnection
 
 For a few dependencies it is possible to select system or embedded versions, check `WIVRN_USE_SYSTEM_xxx` in case you are missing dependencies.
 
+Lighthouse backends can be built together with
+`WIVRN_FEATURE_STEAMVR_LIGHTHOUSE=ON`, `WIVRN_FEATURE_SURVIVE=ON` and
+`WIVRN_FEATURE_OPENHOUSE=ON`. openhouse additionally needs Ceres Solver and
+libudev development files. libsurvive uses Eigen, libusb and Python at configure
+time; its generated mathematical headers are included in the source checkout.
+Both open source backends are fetched at the commits in `openhouse-rev` and
+`libsurvive-rev`, built as WiVRn-specific shared libraries and installed alongside
+the server. No separate libsurvive installation or SteamVR driver replacement
+is needed. See [backend configuration](configuration.md#use-openhouse).
+
+`FETCHCONTENT_SOURCE_DIR_OPENHOUSE` and `FETCHCONTENT_SOURCE_DIR_LIBSURVIVE`
+can point to local checkouts. The openhouse Monado host is generated in the build
+tree from the patched steamvr_lh sources, so subsequent Monado patches are also
+included when reconfiguring. Its directly linked provider factory and host types
+have distinct symbols from steamvr_lh.
+
+With `WIVRN_BUILD_TEST=ON`, `lh-openhouse-adapter-test` runs the existing hotplug,
+roles, prediction and standby tests on that copied host, plus a synthetic provider
+startup/shutdown test that does not access USB. `lh-backend-test` and
+`lh-recording-settings-test` cover selection and persistence across all three.
+
 For more advanced options, check [CMakeLists.txt](../CMakeLists.txt).
 
 ## Profiling / tracing build

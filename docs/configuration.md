@@ -159,7 +159,7 @@ Only available when built with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE`.
 
 Enables the driver to load SteamVR Lighthouse devices. In the dashboard, select
 **Advanced options → Lighthouse backend → SteamVR (steamvr_lh)** and restart the
-internal Monado runtime to apply. Both Lighthouse backends can be included in the
+internal Monado runtime to apply. All three Lighthouse backends can be included in the
 same build; the selector activates one backend at a time.
 
 While a runtime session is running, the dashboard's **Turn off all trackers**
@@ -187,59 +187,68 @@ pose or button events, WiVRn marks inputs and poses inactive and releases contro
 roles back to the headset. Events resume the device automatically. USB discovery
 and reconnection also depend on the installed libsurvive driver.
 
-Requires a build with `WIVRN_FEATURE_SURVIVE=ON` and an installed libsurvive
-providing the `survive` pkg-config package. Keep
-`WIVRN_FEATURE_STEAMVR_LIGHTHOUSE=ON` (the default) to include both backends. After
-that initial build, switching backends only requires saving the dashboard setting
-and restarting the internal Monado runtime. The selector also offers **Disabled**
-and only lists backends included in the build. Recording supports both backends and identifies the selected backend in each session.
-SteamVR-specific base station stabilization and joystick settings do not apply to libsurvive.
-The maximum pose extrapolation setting is shared by both backends.
+Requires `WIVRN_FEATURE_SURVIVE=ON`. WiVRn fetches the LLFA `llfa-main`
+source at the commit recorded in `libsurvive-rev` and builds
+`libwivrn-survive.so`. The Vive transport, playback, global scene solver,
+state-based disambiguator and MPFit poser are embedded in that library; no
+system libsurvive or separately installed plugins are loaded. The shutdown fix
+in `1ddd12c` is included. See [the shutdown investigation](libsurvive-shutdown-handoff.md).
 
-The environment variable `WIVRN_USE_SURVIVE` also enables this backend when set,
-including when the dashboard option is disabled. If both backends are requested
-by legacy JSON settings or environment variables, libsurvive takes precedence.
-The dashboard always saves mutually exclusive `use-steamvr-lh` and `use-survive`
-values. Only the selected driver is initialized, so both drivers never claim the
-USB receivers together.
+For development, use `-DFETCHCONTENT_SOURCE_DIR_LIBSURVIVE=/path/to/libsurvive`
+to build a local checkout instead of fetching the pinned source. The checkout
+must contain the LLFA APIs used by this Monado adapter.
 
-To follow a local libsurvive repository's committed `llfa-main` branch while
-leaving its working tree untouched, run:
+The environment variable `WIVRN_USE_SURVIVE` also requests this backend.
+If legacy JSON or environment variables request several backends, the priority
+is openhouse, libsurvive, then SteamVR, ignoring backends absent from the build.
+The dashboard saves mutually exclusive `use-steamvr-lh`, `use-survive` and
+`use-openhouse` values. Backend changes require restarting the internal Monado
+runtime. Only the selected backend initializes its USB transport.
+
+## `use-openhouse`
+Default value: `false`
+
+Requires `WIVRN_FEATURE_OPENHOUSE=ON` (enabled by default). Select
+**Advanced options → Lighthouse backend → openhouse** and restart the internal
+Monado runtime. `WIVRN_USE_OPENHOUSE` also requests this backend.
+
+WiVRn fetches the source pinned in `openhouse-rev`, builds
+`libwivrn-openhouse.so`, and directly links its private OpenVR provider factory.
+The Monado host is copied from steamvr_lh *after* applying the complete Monado
+patch series. It has independent symbols and lifecycle, retaining prediction,
+controller roles, hotplug, hands, base station stabilization and tracker standby.
+The SteamVR installation and its original Lighthouse driver are not modified.
+
+openhouse keeps its room and device settings under `~/.config/lh/`. Align its
+tracking space with the headset using an external calibration tool. Its native
+room shared memory and viewer telemetry remain available. SteamVR is optional
+for the tracking provider itself; the existing Index hand skeleton loader uses
+SteamVR animation resources when available, so full skeletal output still needs
+those resources (or an explicit `LH_HAND_POSES` path).
+
+Recording saves native `input.lhraw` alongside the copied adapter's pose streams
+and a manifest identifying openhouse. The joystick deadzone, reference base
+station, maximum extrapolation and **Turn off all trackers** controls also apply.
+
+For local development, configure
+`-DFETCHCONTENT_SOURCE_DIR_OPENHOUSE=/path/to/openhouse`. For a build with all
+three choices:
 
 ```sh
-tools/update-libsurvive-backend.sh ~/libsurvive build-survive-check/_deps
-```
-
-This maintains a separate checkout, builds the library and its plugins, and
-installs them under `build-survive-check/_deps/libsurvive-llfa-main-install`.
-Run it again to fetch and fast-forward that independent checkout to the latest
-local `llfa-main`. It records the exact revision in
-`build-survive-check/_deps/libsurvive-llfa-main-revision.txt`.
-The helper builds the committed source without applying WiVRn patches and refuses
-local modifications in its dependency checkout. The Global Scene Solver shutdown
-fix is included in libsurvive `1ddd12c`; the former WiVRn patch is no longer needed.
-`libsurvive-llfa-main-patches.txt` is empty to indicate that no local patches were
-applied. See [the shutdown investigation](libsurvive-shutdown-handoff.md).
-Point WiVRn's `PKG_CONFIG_PATH` at that installation's `lib/pkgconfig` directory
-when configuring, then rebuild WiVRn. If changing an existing build to a different
-installation, clear its cached discovery paths during configuration:
-
-```sh
-PKG_CONFIG_PATH="$PWD/build-survive-check/_deps/libsurvive-llfa-main-install/lib/pkgconfig" \
-cmake -S . -B build-survive-check \
-    -DWIVRN_FEATURE_SURVIVE=ON -DWIVRN_FEATURE_STEAMVR_LIGHTHOUSE=ON \
-    -U 'SURVIVE_*' -U 'LH_SURVIVE_*' \
-    -U '__pkg_config_checked_*SURVIVE' -U 'pkgcfg_lib_*SURVIVE*'
-cmake --build build-survive-check --target wivrn-server wivrn-dashboard openxr_wivrn monado
+cmake -S . -B build-server -GNinja \
+    -DWIVRN_FEATURE_STEAMVR_LIGHTHOUSE=ON \
+    -DWIVRN_FEATURE_SURVIVE=ON -DWIVRN_FEATURE_OPENHOUSE=ON
+cmake --build build-server
 ```
 
 ## `lh-max-extrapolation`
 Default value: `50` ms (also used when unset)
 
-Available with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE` or `WIVRN_FEATURE_SURVIVE`.
+Available with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE`, `WIVRN_FEATURE_SURVIVE` or
+`WIVRN_FEATURE_OPENHOUSE`.
 
 Maximum time in milliseconds that poses may be extrapolated ahead for Lighthouse
-devices. Both backends use the same setting and `LH_MAX_EXTRAPOLATION_MS`
+devices. All three backends use the same setting and `LH_MAX_EXTRAPOLATION_MS`
 environment variable. `0` disables forward prediction; `-1` removes the time
 limit. In the dashboard, uncheck **Clamp extrapolation for Lighthouse tracked
 devices** to save `-1`. The choice persists when switching backends and takes

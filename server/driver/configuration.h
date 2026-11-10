@@ -60,6 +60,7 @@ struct configuration
 	bool debug_gui = false;
 	bool use_steamvr_lh = false;
 	bool use_survive = false;
+	bool use_openhouse = false;
 	lighthouse_backend selected_lighthouse_backend() const;
 	std::string lighthouse_reference_serial;
 	bool lighthouse_recording_enabled = false;
