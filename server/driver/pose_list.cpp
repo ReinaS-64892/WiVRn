@@ -20,6 +20,7 @@
 #include "pose_list.h"
 #include "driver/clock_offset.h"
 #include "driver/polynomial_interpolator.h"
+#include "driver/quaternion_derivative.h"
 #include "math/m_api.h"
 #include "math/m_eigen_interop.hpp"
 #include "math/m_space.h"
@@ -193,13 +194,9 @@ void pose_list::add_sample(XrTime production_timestamp, XrTime timestamp, const 
 			        pose.pose.orientation.y,
 			        pose.pose.orientation.z};
 
-			Eigen::Quaternionf ω{
-			        0,
-			        pose.angular_velocity.x,
-			        pose.angular_velocity.y,
-			        pose.angular_velocity.z};
-
-			orientation.dy.emplace(0.5 * (ω * q).coeffs());
+			orientation.dy = quaternion_derivative(q, {pose.angular_velocity.x,
+			                                         pose.angular_velocity.y,
+			                                         pose.angular_velocity.z});
 		}
 	}
 

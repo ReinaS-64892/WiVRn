@@ -1,5 +1,47 @@
 # Lighthouse ベースステーションを基準にする実験機能
 
+## QuestLHSync 向けのベースステーション pose 公開
+
+`0025-d-steamvr_lh-expose-base-station-trackers.patch` は、有効化したベースステーションを
+pose のみを持つ通常の xdev として公開します。Lighthouse を有効にしたサーバーで既定で有効です。
+`LH_EXPOSE_BASE_STATIONS=0` をサーバーに渡すと、この公開だけを無効化できます。
+HMD クライアントとネットワークプロトコルの変更は不要です。
+
+`0026-oxr-refresh-xdev-hotplug.patch` は OpenXR の xdev 一覧を作成する前に、
+既存の IPC hotplug 更新を呼び出します。headless アプリでは action の同期がなく、
+一覧だけを作り直しても接続後に見つかった BS が現れない場合があるためです。
+既存の一覧はスナップショットとして保持し、新しい一覧に追加デバイスを含めます。
+回帰テストは `tests_xdev_hotplug` です。
+
+- シリアルは元の `LHB-...`、名前は `Lighthouse Base Station Tracker` です。
+- `XRT_INPUT_GENERIC_TRACKER_POSE` を `XR_MNDX_xdev_space` から取得できます。
+- 実トラッカーと同じ Lighthouse tracking origin と、同じ chaperone・既存の安定化処理を使います。
+  tracking origin / reference space の offset はこのパッチでは変更しません。
+- 低頻度の測定間では位置・姿勢を保持し、移動を外挿しません。無効・切断通知では pose を無効化します。
+- 初期探索と接続後の追加に対応します。コントローラの役割や入力は割り当てません。
+- xrizer 側の対応ブランチは `LHB-` をゲーム向けの body tracker から除外します。
+  直接 xdev を列挙する OpenXR アプリからは見えます。
+
+確認は、対応する OpenXR headless/xdev クライアントからデバイスを列挙して行います。
+QuestLHSync の対応ブランチ `monado-base-stations` では、`LHB-` xdev の pose を較正時の
+配置入力に使います。`questlhsync-xr --dump` で公開状態を確認できます。
+取得した pose は選択した参照空間と現在の Lighthouse origin offset を含むため、
+補正前の配置に戻す際は両方の変換を考慮してください。
+
+## 複数バックエンドでの適用範囲
+
+steamvr_lh と openhouse の両ホストで、ベースステーションの xdev 公開、
+一覧の hotplug 更新、`mnd_root_get_lighthouse_calibration` の公開 API を維持します。
+受信機情報はプロバイダーから届くプロパティを問い合わせるため、未提供のデバイスでは
+`MND_ERROR_INVALID_OPERATION` を返します。推測した受信機シリアルは返しません。
+
+`0029-d-steamvr_lh-average-base-station-relationships.patch` による Valve DLL 内部の
+フックと台間関係の平均化は steamvr_lh のみに適用します。設定画面でも SteamVR 選択時だけ
+表示します。openhouse のホストを生成するときは、このパッチだけを一時コピーから除去し、
+追跡処理は openhouse 自身に任せます。共有の Monado ソースや steamvr_lh のフックは変更しません。
+
+以下の診断・安定化機能は、この pose 公開とは独立しています。
+
 この機能は、WiVRn と VIVE Tracker の空間合わせがずれる原因を測定するための実験機能です。
 ベースステーションとトラッカーの pose を同じ変換段階で記録し、座標変化が共通の剛体変換か確認します。
 実験用の安定化は、シリアルで固定した BS の位置・姿勢を使い、Lighthouse デバイス群を BS 原点・BS の軸へ変換します。
@@ -86,8 +128,7 @@ BS 値は低頻度なので保持し、直近64回分の補正区間を保持し
    `device_class=4` がベースステーション、`device_class=3` が GenericTracker です。
    announcement はあっても pose がない場合、ドライバが pose を返しているとは判断できません。
 
-初期探索だけに対応します。遅れて現れたデバイスが拒否された場合は、まず
-`LH_DISCOVER_WAIT_MS` を増やして起動し直してください。ベースステーション用の index は 17–32、
+初期探索と接続後の追加に対応します。ベースステーション用の index は 17–32、
 コンテナ handle は 18–33 です。HMD の index 0 とコントローラの index 1–16 は専用の枠として残します。
 1 Context あたり最大16回の参照デバイスの Activate を試せます。失敗した index は遅延コールバックとの混同を防ぐため再利用しません。
 同じシリアルまたは driver オブジェクトの重複登録は拒否します。
@@ -95,7 +136,7 @@ BS 値は低頻度なので保持し、直近64回分の補正区間を保持し
 診断オブジェクトは Context が所有し、Activate の前に登録します。
 ドライバの Activate / Deactivate / Cleanup 呼出し中は `devices_mut` を保持しません。
 正常に Activate した参照デバイスは Context 終了時に Deactivate し、provider の Cleanup 後に解放します。
-コントローラの入力プロファイルや OpenXR のデバイス列挙には追加しません。
+コントローラの入力プロファイルには追加しません。OpenXR には上記の pose 用 xdev を介して公開します。
 
 ## pose の解釈
 

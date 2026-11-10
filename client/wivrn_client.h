@@ -45,6 +45,7 @@ public:
 private:
 	control_socket_t control;
 	stream_socket_t stream;
+	std::unique_ptr<port_forwarder> forwarding;
 
 	std::atomic<uint64_t> bytes_sent_ = 0;
 	std::atomic<uint64_t> bytes_received_ = 0;

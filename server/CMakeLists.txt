@@ -55,6 +55,7 @@ set(XRT_FEATURE_OPENXR_INTERACTION_TOUCH_PLUS    ON)
 set(XRT_FEATURE_OPENXR_LAYER_COLOR_SCALE_BIAS    ON)
 set(XRT_FEATURE_OPENXR_LAYER_DEPTH              OFF)
 set(XRT_FEATURE_OPENXR_VARJO_QUAD_VIEWS         OFF)
+set(XRT_FEATURE_OPENXR_SPACE_UNBOUNDED          OFF)
 
 set(XRT_HAVE_BLUETOOTH               OFF)
 set(XRT_HAVE_GST                     OFF)
@@ -388,6 +389,20 @@ if(WIVRN_BUILD_SERVER)
 	install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/lh-recorder-cli DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME lh-recorder)
 endif()
 
+if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER)
+    enable_testing()
+    add_library(wivrn-xdev-test-catch STATIC "${monado_SOURCE_DIR}/src/external/Catch2/catch_amalgamated.cpp")
+    target_include_directories(wivrn-xdev-test-catch PUBLIC "${monado_SOURCE_DIR}/src/external/Catch2")
+    target_compile_definitions(wivrn-xdev-test-catch PUBLIC CATCH_CONFIG_NO_COUNTER)
+    add_executable(lh-xdev-hotplug-test "${monado_SOURCE_DIR}/tests/tests_xdev_hotplug.cpp")
+    target_link_libraries(lh-xdev-hotplug-test PRIVATE wivrn-xdev-test-catch st_oxr aux_util xrt-interfaces xrt-external-openxr)
+    set_target_properties(lh-xdev-hotplug-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    add_executable(quaternion-interpolation-test driver/tests/quaternion_interpolation.cpp)
+    target_include_directories(quaternion-interpolation-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_BINARY_DIR}/common)
+    target_link_libraries(quaternion-interpolation-test PRIVATE Eigen3::Eigen xrt-external-openxr)
+    add_test(NAME quaternion-interpolation COMMAND quaternion-interpolation-test)
+endif()
+
 if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER AND WIVRN_FEATURE_STEAMVR_LIGHTHOUSE)
     add_executable(lh-recording-startup-test
         ../tools/lh-recorder/tests/startup_harness.cpp
@@ -410,6 +425,21 @@ if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER AND WIVRN_FEATURE_STEAMVR_LIGHTHOUSE)
     if(WIVRN_FEATURE_OPENHOUSE)
         target_link_libraries(lh-recording-startup-test PRIVATE drv_openhouse)
     endif()
+
+    # Test the original host's metadata exports and its retained Valve-only hook.
+    foreach(test references stabilization relationships)
+        add_executable(lh-steamvr-${test}-test "${monado_SOURCE_DIR}/tests/tests_steamvr_lh_${test}.cpp")
+        target_include_directories(lh-steamvr-${test}-test PRIVATE
+            "${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh" "${monado_SOURCE_DIR}/src/xrt/drivers")
+        target_link_libraries(lh-steamvr-${test}-test PRIVATE drv_steamvr_lh aux_util aux_math aux_vive
+            xrt-external-openvr ${CMAKE_DL_LIBS})
+        set_target_properties(lh-steamvr-${test}-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    endforeach()
+    add_library(lh-relationships-test-driver SHARED "${monado_SOURCE_DIR}/tests/tests_steamvr_lh_relationship_driver.cpp")
+    set_target_properties(lh-relationships-test-driver PROPERTIES PREFIX "" OUTPUT_NAME "driver_lighthouse"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/mock-provider")
+    target_compile_options(lh-relationships-test-driver PRIVATE -O0 -fno-omit-frame-pointer)
+    add_dependencies(lh-steamvr-relationships-test lh-relationships-test-driver)
 
     add_executable(lh-hotplug-test ../tools/lh-recorder/tests/hotplug.cpp)
     target_compile_features(lh-hotplug-test PRIVATE cxx_std_20)

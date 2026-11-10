@@ -152,11 +152,22 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
+            RowLayout {
+                visible: Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr"
+                Controls.CheckBox {
+                    id: lh_average_relationships
+                    text: i18n("Average base station relationships")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Reduces base station placement changes by averaging repeated measurements. Reconnect the headset to apply.")
+                }
+            }
             Controls.CheckBox {
                 id: lighthouse_stabilization_enabled
                 visible: settings.openvrLighthouseSelected
                 text: i18n("Use a base station as tracking origin (experimental)")
             }
+
             Controls.ComboBox {
                 id: lighthouse_reference_serial
                 visible: settings.openvrLighthouseSelected
@@ -359,6 +370,10 @@ Kirigami.ScrollablePage {
 
         }
 
+        PortForwardingSettings {
+            id: port_forwarding
+        }
+
         Item {
             // spacer item
             Layout.fillHeight: true
@@ -369,6 +384,8 @@ Kirigami.ScrollablePage {
         standardButtons: Controls.DialogButtonBox.Ok | Controls.DialogButtonBox.Cancel | Controls.DialogButtonBox.Reset
 
         onAccepted: {
+            if (Settings.portForwardingError.length > 0)
+                return;
             settings.save();
             Settings.save(WivrnServer);
 
@@ -402,6 +419,7 @@ Kirigami.ScrollablePage {
         DashboardSettings.show_system_checks = show_system_checks.checked;
 
         Settings.debugGui = debug_gui.checked;
+        Settings.lhAverageRelationships = lh_average_relationships.checked;
         if (lighthouse_backend.currentIndex >= 0)
             Settings.lighthouseBackend = lighthouse_backend.currentValue;
         Settings.lighthouseReferenceSerial = lighthouse_stabilization_enabled.checked ? lighthouse_reference_serial.editText.trim() : "";
@@ -419,8 +437,10 @@ Kirigami.ScrollablePage {
     }
 
     function load() {
+        port_forwarding.load();
         select_game.load();
         debug_gui.checked = Settings.debugGui;
+        lh_average_relationships.checked = Settings.lhAverageRelationships;
         lighthouse_backend.currentIndex = lighthouse_backend.indexOfValue(Settings.lighthouseBackend);
         lighthouse_stabilization_enabled.checked = Settings.lighthouseReferenceSerial.length > 0;
         lighthouse_reference_serial.currentIndex = Settings.lighthouseReferenceCandidates.indexOf(Settings.lighthouseReferenceSerial);

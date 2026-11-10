@@ -42,15 +42,18 @@ target_link_options(wivrn-openhouse PRIVATE
     "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports.map" -Wl,--no-undefined)
 install(TARGETS wivrn-openhouse LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 
+# Keep the proprietary provider's internal hooks exclusive to steamvr_lh.
+# Public OpenVR metadata and libmonado/xdev exports remain in the copied host.
+set(excluded_patches "${PROJECT_SOURCE_DIR}/patches/monado/0029-d-steamvr_lh-average-base-station-relationships.patch")
 set(adapter "${CMAKE_CURRENT_BINARY_DIR}/adapter")
 file(GLOB_RECURSE adapter_inputs CONFIGURE_DEPENDS
     "${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh/*.cpp"
     "${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh/*.hpp"
     "${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh/*.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    ${adapter_inputs} "${CMAKE_CURRENT_SOURCE_DIR}/prepare_adapter.py")
+    ${adapter_inputs} ${excluded_patches} "${CMAKE_CURRENT_SOURCE_DIR}/prepare_adapter.py")
 execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/prepare_adapter.py"
-    "${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh" "${adapter}"
+    "${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh" "${adapter}" ${excluded_patches}
     COMMAND_ERROR_IS_FATAL ANY)
 file(GLOB_RECURSE adapter_sources "${adapter}/*.cpp")
 add_library(drv_openhouse STATIC ${adapter_sources})
@@ -76,4 +79,19 @@ if(WIVRN_BUILD_TEST)
         target_link_libraries(lh-openhouse-adapter-test PRIVATE drv_steamvr_lh)
     endif()
     set_target_properties(lh-openhouse-adapter-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    # The same exported base-station and receiver metadata must work in the
+    # openhouse host, with Valve relationship hooks removed above.
+    foreach(test references stabilization)
+        set(input "${monado_SOURCE_DIR}/tests/tests_steamvr_lh_${test}.cpp")
+        set(output "${CMAKE_CURRENT_BINARY_DIR}/openhouse_${test}.cpp")
+        execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/prepare_adapter.py"
+            --test "${input}" "${output}" COMMAND_ERROR_IS_FATAL ANY)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${input}")
+        add_executable(lh-openhouse-${test}-test "${output}")
+        target_include_directories(lh-openhouse-${test}-test PRIVATE "${adapter}"
+            "${monado_SOURCE_DIR}/src/xrt/drivers")
+        target_link_libraries(lh-openhouse-${test}-test PRIVATE drv_openhouse aux_util aux_math base)
+        set_target_properties(lh-openhouse-${test}-test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    endforeach()
 endif()

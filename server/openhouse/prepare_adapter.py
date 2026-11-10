@@ -3,11 +3,15 @@
 """Clone the patched Monado OpenVR host without modifying its source tree.
 
 Run after Monado's patches, so prediction, hotplug, roles, hands and shutdown
-stay identical to steamvr_lh. Only ownership symbols and provider loading differ.
+are inherited from steamvr_lh. Explicitly excluded Valve provider hooks are
+reverted in a private copy before ownership symbols and provider loading change.
 Unexpected upstream loader changes fail configuration rather than loading Valve.
 """
 import re
 import sys
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -27,7 +31,26 @@ def rename_symbols(text):
     return text.replace('steamvr_lh', 'openhouse').replace('lighthouse_reference', 'openhouse_reference').replace('reference_recorder.hpp', 'openhouse_reference_recorder.hpp')
 
 
-def prepare(source, destination):
+def prepare(source, destination, excluded_patches=()):
+    if excluded_patches:
+        # Work on a private copy: never revert patches in the shared Monado tree.
+        # Retain metadata/xdev/libmonado changes while removing Valve-only hooks.
+        with tempfile.TemporaryDirectory(prefix='openhouse-adapter-') as temporary:
+            root = Path(temporary)
+            relative = Path('src/xrt/drivers/steamvr_lh')
+            shutil.copytree(source, root / relative)
+            for patch in reversed(list(excluded_patches)):
+                sections = re.split(r'(?=^diff --git )', patch.read_text(), flags=re.M)
+                driver_changes = ''.join(section for section in sections
+                    if section.startswith('diff --git a/src/xrt/drivers/steamvr_lh/'))
+                if not driver_changes:
+                    raise RuntimeError(f'No steamvr_lh changes found in excluded patch: {patch}')
+                subprocess.run(['patch', '--reverse', '--batch', '--fuzz=0', '-p1'],
+                    cwd=root, input=driver_changes, text=True, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            prepare(root / relative, destination)
+        return
+    expected = set()
     for path in sorted(source.rglob('*')):
         if path.suffix not in ('.cpp', '.hpp', '.h'):
             continue
@@ -52,13 +75,19 @@ def prepare(source, destination):
         relative = str(path.relative_to(source)).replace('steamvr_lh', 'openhouse')
         relative = relative.replace('reference_recorder.hpp', 'openhouse_reference_recorder.hpp')
         target = destination / relative
+        expected.add(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.read_text() != text:
             target.write_text(text)
+
+    # Removed/excluded upstream files must not survive a reconfigure.
+    for target in destination.rglob('*'):
+        if target.suffix in ('.cpp', '.hpp', '.h') and target not in expected:
+            target.unlink()
 
 
 if __name__ == '__main__':
     if sys.argv[1] == '--test':
         Path(sys.argv[3]).write_text(rename_symbols(Path(sys.argv[2]).read_text()))
     else:
-        prepare(Path(sys.argv[1]), Path(sys.argv[2]))
+        prepare(Path(sys.argv[1]), Path(sys.argv[2]), [Path(p) for p in sys.argv[3:]])

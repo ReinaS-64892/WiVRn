@@ -1,0 +1,133 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] oxr: refresh IPC devices before creating xdev snapshots
+
+Headless clients may never sync actions or query roles. Recreating an
+xdev list then keeps using stale IPC proxies even after Lighthouse base
+stations are published. Query roles before taking the snapshot to trigger
+the existing IPC hotplug refresh. Keep previous snapshots immutable and
+propagate refresh failures. Add a late-base-station regression test.
+---
+diff --git a/src/xrt/state_trackers/oxr/oxr_xdev.c b/src/xrt/state_trackers/oxr/oxr_xdev.c
+--- a/src/xrt/state_trackers/oxr/oxr_xdev.c
++++ b/src/xrt/state_trackers/oxr/oxr_xdev.c
+@@ -170,6 +170,15 @@
+ {
+ 	struct xrt_system_devices *xsysd = sess->sys->xsysd;
++
++	// IPC refreshes its device proxies when roles are queried. Headless xdev
++	// clients may never sync actions, so refresh before taking each snapshot.
++	struct xrt_system_roles roles = {0};
++	xrt_result_t xret = xrt_system_devices_get_roles(xsysd, &roles);
++	if (xret != XRT_SUCCESS) {
++		return oxr_error(log, XR_ERROR_RUNTIME_FAILURE, "Failed to refresh devices for xdev snapshot");
++	}
++
+ 	uint32_t count = xsysd->static_xdev_count;
+ 
+ 	struct oxr_xdev_list *xdl = NULL;
+ 	OXR_ALLOCATE_HANDLE_OR_RETURN(log, xdl, OXR_XR_DEBUG_XDEVLIST, oxr_xdev_list_destroy, &sess->handle);
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -42,7 +42,7 @@
+ 		)
+ endif()
+ if(XRT_FEATURE_OPENXR)
+-	list(APPEND tests tests_input_transform)
++	list(APPEND tests tests_input_transform tests_xdev_hotplug)
+ endif()
+ if(XRT_HAVE_OPENGL
+    AND XRT_HAVE_OPENGL_GLX
+@@ -132,6 +132,9 @@
+ 		tests_input_transform PRIVATE st_oxr xrt-interfaces xrt-external-openxr
+ 		)
+ endif()
++if(XRT_FEATURE_OPENXR)
++	target_link_libraries(tests_xdev_hotplug PRIVATE st_oxr xrt-interfaces xrt-external-openxr)
++endif()
+ if(_have_opengl_test)
+ 	target_link_libraries(
+ 		tests_comp_client_opengl PRIVATE comp_client comp_mock aux_ogl SDL2::SDL2
+diff --git a/tests/tests_xdev_hotplug.cpp b/tests/tests_xdev_hotplug.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/tests_xdev_hotplug.cpp
+@@ -0,0 +1,78 @@
++// Copyright 2026, OpenAI.
++// SPDX-License-Identifier: BSL-1.0
++#include "catch_amalgamated.hpp"
++#include <oxr/oxr_logger.h>
++#include <oxr/oxr_objects.h>
++
++#ifdef OXR_HAVE_MNDX_xdev_space
++namespace {
++struct Devices : xrt_system_devices
++{
++	xrt_device head{}, station{};
++	xrt_input head_pose{}, station_pose{};
++	bool arrived = false, fail = false;
++	unsigned refreshes = 0;
++	Devices() : xrt_system_devices{}
++	{
++		head_pose.name = XRT_INPUT_GENERIC_HEAD_POSE;
++		station_pose.name = XRT_INPUT_GENERIC_TRACKER_POSE;
++		head.inputs = &head_pose;
++		head.input_count = 1;
++		station.inputs = &station_pose;
++		station.input_count = 1;
++		snprintf(station.str, sizeof(station.str), "Lighthouse Base Station Tracker");
++		snprintf(station.serial, sizeof(station.serial), "LHB-12345678");
++		static_xdevs[0] = &head;
++		static_xdev_count = 1;
++		get_roles = [](xrt_system_devices *sys, xrt_system_roles *roles) {
++			auto &self = *static_cast<Devices *>(sys);
++			self.refreshes++;
++			if (self.fail)
++				return XRT_ERROR_IPC_FAILURE;
++			// IPC discovers late devices only when roles are refreshed.
++			if (self.arrived) {
++				self.static_xdevs[1] = &self.station;
++				self.static_xdev_count = 2;
++			}
++			*roles = {};
++			return XRT_SUCCESS;
++		};
++	}
++};
++} // namespace
++TEST_CASE("xdev snapshots refresh late IPC base stations", "[xdev][hotplug]")
++{
++	Devices devices;
++	oxr_logger log{};
++	oxr_log_init(&log, "xdev_hotplug");
++	oxr_system system{};
++	system.xsysd = &devices;
++	oxr_session session{};
++	session.sys = &system;
++	REQUIRE(oxr_handle_parent_init(
++	            &log, &session.handle, OXR_XR_DEBUG_SESSION,
++	            [](oxr_logger *, oxr_handle_base *) { return XR_SUCCESS; }, nullptr) == XR_SUCCESS);
++	XrCreateXDevListInfoMNDX info{};
++	info.type = XR_TYPE_CREATE_XDEV_LIST_INFO_MNDX;
++	oxr_xdev_list *before = nullptr, *after = nullptr;
++	REQUIRE(oxr_xdev_list_create(&log, &session, &info, &before) == XR_SUCCESS);
++	REQUIRE(before->device_count == 1);
++	devices.arrived = true;
++	REQUIRE(oxr_xdev_list_create(&log, &session, &info, &after) == XR_SUCCESS);
++	CHECK(after->device_count == 2);
++	CHECK(before->device_count == 1); // Existing snapshots stay immutable.
++	CHECK(devices.refreshes == 2);
++	if (after->device_count == 2) {
++		XrXDevPropertiesMNDX props{};
++		props.type = XR_TYPE_XDEV_PROPERTIES_MNDX;
++		REQUIRE(oxr_xdev_list_get_properties(&log, after, 1, &props) == XR_SUCCESS);
++		CHECK(std::string(props.serial) == "LHB-12345678");
++		CHECK(props.canCreateSpace == XR_TRUE);
++	}
++	devices.fail = true;
++	oxr_xdev_list *failed = nullptr;
++	CHECK(oxr_xdev_list_create(&log, &session, &info, &failed) == XR_ERROR_RUNTIME_FAILURE);
++	CHECK(failed == nullptr);
++	REQUIRE(oxr_handle_parent_destroy(&log, &session.handle) == XR_SUCCESS);
++}
++#endif

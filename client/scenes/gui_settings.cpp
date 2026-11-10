@@ -574,6 +574,19 @@ void settings_devices(const settings_context & ctx)
 	        .default_bool = default_config.forward_gamepad,
 	});
 
+	if (ctx.instance.has_extension("XR_VALVE_frame_controller_interaction"))
+	{
+		list.push_back({
+		        .id = "##emulated_gamepad",
+		        .label = _C("setting name", "Emulated Gamepad"),
+		        .description = _("Double-click both grips to start using your controllers as a gamepad."),
+		        .ui = ui_kind::toggle,
+		        .get_bool = [&config] { return config.emulated_gamepad; },
+		        .set_bool = [&config](bool v) { config.emulated_gamepad = v; config.save(); },
+		        .default_bool = default_config.emulated_gamepad,
+		});
+	}
+
 	ui::page_header(_cS("page header title", "Devices"), _cS("page header subtitle", "Forward input devices to the PC."));
 	render_settings(ctx, "##devices", list);
 
@@ -716,6 +729,19 @@ void settings_system(const settings_context & ctx)
 	auto & config = ctx.config;
 	auto & default_config = ctx.default_config;
 	std::vector<setting> list;
+
+	list.push_back({
+	        .id = "##presence_debounce",
+	        .label = _C("setting name", "HMD removal delay"),
+	        .description = _("Ignore brief headset removal signals before reporting the HMD as not worn."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(config.user_presence_debounce_ms); },
+	        .set_int = [&config](int v) { config.user_presence_debounce_ms = uint32_t(v); config.save(); },
+	        .v_min = 0,
+	        .v_max = 1000,
+	        .fmt = "%d ms",
+	        .default_int = int(default_config.user_presence_debounce_ms),
+	});
 
 	auto language_name = [](const std::locale & loc = std::locale()) {
 		return boost::locale::pgettext("language selection, replace with the name of the language", "English", loc);

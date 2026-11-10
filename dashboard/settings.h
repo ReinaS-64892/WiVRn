@@ -69,6 +69,8 @@ public:
 	Q_PROPERTY(bool can10bit READ can10bit NOTIFY codecChanged)
 	Q_PROPERTY(bool tenbit READ tenbit WRITE set_tenbit NOTIFY tenbitChanged)
 
+	Q_PROPERTY(QVariantList portForwarding READ portForwarding WRITE set_portForwarding NOTIFY portForwardingChanged)
+	Q_PROPERTY(QString portForwardingError READ portForwardingError NOTIFY portForwardingChanged)
 	Q_PROPERTY(bool tcpOnly READ tcpOnly WRITE set_tcpOnly NOTIFY tcpOnlyChanged)
 	Q_PROPERTY(int port READ port WRITE set_port NOTIFY portChanged)
 	Q_PROPERTY(QString hostname READ hostname WRITE set_hostname NOTIFY hostnameChanged)
@@ -88,6 +90,7 @@ public:
 	Q_PROPERTY(bool openhouse_supported READ openhouse CONSTANT)
 	Q_PROPERTY(bool useOpenhouse READ useOpenhouse WRITE set_useOpenhouse NOTIFY useOpenhouseChanged)
 	Q_PROPERTY(bool steamVrLh READ steamVrLh WRITE set_steamVrLh NOTIFY steamVrLhChanged)
+	Q_PROPERTY(bool lhAverageRelationships READ lhAverageRelationships WRITE set_lhAverageRelationships NOTIFY lhAverageRelationshipsChanged)
 	Q_PROPERTY(bool lhMaxExtrapolationEnabled READ lhMaxExtrapolationEnabled NOTIFY lhMaxExtrapolationEnabledChanged)
 	Q_PROPERTY(int64_t lhMaxExtrapolation READ lhMaxExtrapolation WRITE set_lhMaxExtrapolation NOTIFY lhMaxExtrapolationChanged)
 	Q_PROPERTY(float lhStickDeadzone READ lhStickDeadzone WRITE set_lhStickDeadzone NOTIFY lhStickDeadzoneChanged)
@@ -105,6 +108,7 @@ public:
 	SETTER_GETTER_NOTIFY(QString, application)
 	SETTER_GETTER_NOTIFY(bool, hidForwarding)
 	SETTER_GETTER_NOTIFY(bool, debugGui)
+	SETTER_GETTER_NOTIFY(bool, lhAverageRelationships)
 	SETTER_GETTER_NOTIFY(bool, steamVrLh)
 	SETTER_GETTER_NOTIFY(bool, useSurvive)
 	SETTER_GETTER_NOTIFY(bool, useOpenhouse)
@@ -118,6 +122,7 @@ public:
 	SETTER_GETTER_NOTIFY(bool, lhMaxExtrapolationEnabled)
 	SETTER_GETTER_NOTIFY(int64_t, lhMaxExtrapolation)
 	SETTER_GETTER_NOTIFY(float, lhStickDeadzone)
+	SETTER_GETTER_NOTIFY(QVariantList, portForwarding)
 	SETTER_GETTER_NOTIFY(bool, tcpOnly)
 	SETTER_GETTER_NOTIFY(int, port)
 	SETTER_GETTER_NOTIFY(QString, hostname)
@@ -140,6 +145,7 @@ public:
 	QList<video_codec> allowedCodecs() const;
 	bool can10bit() const;
 
+	QString portForwardingError() const;
 	bool flatpak() const;
 	int default_port() const;
 	bool debug_gui() const;

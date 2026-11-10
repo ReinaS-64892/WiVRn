@@ -79,7 +79,10 @@ is needed. See [backend configuration](configuration.md#use-openhouse).
 `FETCHCONTENT_SOURCE_DIR_OPENHOUSE` and `FETCHCONTENT_SOURCE_DIR_LIBSURVIVE`
 can point to local checkouts. The openhouse Monado host is generated in the build
 tree from the patched steamvr_lh sources, so subsequent Monado patches are also
-included when reconfiguring. Its directly linked provider factory and host types
+included when reconfiguring. The Valve-internal relationship-averaging patch
+is explicitly removed from a private copy for openhouse; it remains active in
+steamvr_lh. Base station/xdev exports and receiver-calibration metadata remain
+in both hosts. Its directly linked provider factory and host types
 have distinct symbols from steamvr_lh.
 
 With `WIVRN_BUILD_TEST=ON`, `lh-openhouse-adapter-test` runs the existing hotplug,
@@ -88,6 +91,8 @@ startup/shutdown test that does not access USB. `lh-backend-test` and
 `lh-recording-settings-test` cover selection and persistence across all three.
 
 For more advanced options, check [CMakeLists.txt](../CMakeLists.txt).
+
+For the Flatpak, see [flatpak](flatpak.md).
 
 ## Profiling / tracing build
 

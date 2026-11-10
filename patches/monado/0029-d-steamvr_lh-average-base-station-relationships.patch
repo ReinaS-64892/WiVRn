@@ -1,0 +1,1756 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] d/steamvr_lh: own base station relationship averaging
+
+Average Valve relationship measurements in the Lighthouse driver before
+provider Init starts callbacks. Own the estimator for the Context lifetime,
+flush on the existing frame thread, and remove hooks after provider Cleanup.
+Persist station-pair estimates in config/lighthouse/monado-relations.json.
+
+Default on for supported x86-64 drivers; LH_AVERAGE_RELATIONSHIPS=0 disables
+the feature. Unsupported binaries and architectures keep Valve placement.
+No external calibration app, companion library or special launcher is needed.
+
+The estimator and guarded Linux hook are adapted from QuestLHSync under MIT;
+retain its license and the HDE64 BSD license in the driver source. Test real
+Context lifetimes, hook routing, inverse/antipodal poses, outliers, movement,
+persistence, invalid state, and environment/default enable/disable behavior.
+
+diff --git a/src/xrt/drivers/CMakeLists.txt b/src/xrt/drivers/CMakeLists.txt
+--- a/src/xrt/drivers/CMakeLists.txt
++++ b/src/xrt/drivers/CMakeLists.txt
+@@ -641,6 +641,7 @@
+ 		steamvr_lh/device.cpp
+ 		steamvr_lh/reference_recorder.cpp
+ 		steamvr_lh/base_station_stabilizer.cpp
++		steamvr_lh/relations/relations.cpp
+ 		steamvr_lh/interfaces/driver_manager.cpp
+ 		steamvr_lh/interfaces/iobuffer.cpp
+ 		steamvr_lh/interfaces/resources.cpp
+@@ -648,6 +649,10 @@
+ 		steamvr_lh/interfaces/blockqueue.cpp
+ 		steamvr_lh/interfaces/paths.cpp
+ 		)
++	if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
++		target_sources(drv_steamvr_lh PRIVATE steamvr_lh/relations/hook_linux.cpp steamvr_lh/relations/hde/hde64.c)
++		target_compile_definitions(drv_steamvr_lh PRIVATE LH_RELATIONS_X86_64)
++	endif()
+ 	target_link_libraries(
+ 		drv_steamvr_lh
+ 		PRIVATE
+diff --git a/src/xrt/drivers/steamvr_lh/interfaces/context.hpp b/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
+--- a/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
++++ b/src/xrt/drivers/steamvr_lh/interfaces/context.hpp
+@@ -8,6 +8,7 @@
+  */
+ 
+ #pragma once
++#include "../relations/relations.h"
+ 
+ #include <array>
+ #include <condition_variable>
+@@ -193,6 +194,8 @@
+ 
+ public:
+ 	~Context();
++	//! Driver-owned relationship estimator; provider callbacks must stop before it is removed.
++	std::unique_ptr<lh_relations::RelationshipAverager> relations;
+ 
+ 	[[nodiscard]] static std::shared_ptr<Context>
+ 	create(const std::string &steam_install,
+diff --git a/src/xrt/drivers/steamvr_lh/relations/LICENSE b/src/xrt/drivers/steamvr_lh/relations/LICENSE
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/LICENSE
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2026 CreoleVR
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/src/xrt/drivers/steamvr_lh/relations/hde/LICENSE b/src/xrt/drivers/steamvr_lh/relations/hde/LICENSE
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/hde/LICENSE
+@@ -0,0 +1,25 @@
++Hacker Disassembler Engine 64 C
++Copyright (c) 2008-2009, Vyacheslav Patkov.
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions
++are met:
++
++ 1. Redistributions of source code must retain the above copyright
++    notice, this list of conditions and the following disclaimer.
++ 2. Redistributions in binary form must reproduce the above copyright
++    notice, this list of conditions and the following disclaimer in the
++    documentation and/or other materials provided with the distribution.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
++PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR
++CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
++PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
++LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
++NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+diff --git a/src/xrt/drivers/steamvr_lh/relations/hde/hde64.c b/src/xrt/drivers/steamvr_lh/relations/hde/hde64.c
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/hde/hde64.c
+@@ -0,0 +1,339 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Hacker Disassembler Engine 64 C
++ * Copyright (c) 2008-2009, Vyacheslav Patkov.
++ * All rights reserved.
++ *
++ */
++
++#if defined(_M_X64) || defined(__x86_64__)
++
++#include "hde64.h"
++#include <string.h>
++#include "table64.h"
++
++unsigned int hde64_disasm(const void *code, hde64s *hs)
++{
++    uint8_t x, c, *p = (uint8_t *)code, cflags, opcode, pref = 0;
++    uint8_t *ht = hde64_table, m_mod, m_reg, m_rm, disp_size = 0;
++    uint8_t op64 = 0;
++
++    // Avoid using memset to reduce the footprint.
++#ifndef _MSC_VER
++    memset((uint8_t *)hs, 0, sizeof(hde64s));
++#else
++    __stosb((uint8_t *)hs, 0, sizeof(hde64s));
++#endif
++
++    for (x = 16; x; x--)
++        switch (c = *p++) {
++            case 0xf3:
++                hs->p_rep = c;
++                pref |= PRE_F3;
++                break;
++            case 0xf2:
++                hs->p_rep = c;
++                pref |= PRE_F2;
++                break;
++            case 0xf0:
++                hs->p_lock = c;
++                pref |= PRE_LOCK;
++                break;
++            case 0x26: case 0x2e: case 0x36:
++            case 0x3e: case 0x64: case 0x65:
++                hs->p_seg = c;
++                pref |= PRE_SEG;
++                break;
++            case 0x66:
++                hs->p_66 = c;
++                pref |= PRE_66;
++                break;
++            case 0x67:
++                hs->p_67 = c;
++                pref |= PRE_67;
++                break;
++            default:
++                goto pref_done;
++        }
++  pref_done:
++
++    hs->flags = (uint32_t)pref << 23;
++
++    if (!pref)
++        pref |= PRE_NONE;
++
++    if ((c & 0xf0) == 0x40) {
++        hs->flags |= F_PREFIX_REX;
++        if ((hs->rex_w = (c & 0xf) >> 3) && (*p & 0xf8) == 0xb8)
++            op64++;
++        hs->rex_r = (c & 7) >> 2;
++        hs->rex_x = (c & 3) >> 1;
++        hs->rex_b = c & 1;
++        if (((c = *p++) & 0xf0) == 0x40) {
++            opcode = c;
++            goto error_opcode;
++        }
++    }
++
++    if ((hs->opcode = c) == 0x0f) {
++        hs->opcode2 = c = *p++;
++        ht += DELTA_OPCODES;
++    } else if (c >= 0xa0 && c <= 0xa3) {
++        op64++;
++        if (pref & PRE_67)
++            pref |= PRE_66;
++        else
++            pref &= ~PRE_66;
++    }
++
++    opcode = c;
++    cflags = ht[ht[opcode / 4] + (opcode % 4)];
++
++    if (cflags == C_ERROR) {
++      error_opcode:
++        hs->flags |= F_ERROR | F_ERROR_OPCODE;
++        cflags = 0;
++        if ((opcode & -3) == 0x24)
++            cflags++;
++    }
++
++    x = 0;
++    if (cflags & C_GROUP) {
++        uint16_t t;
++        t = *(uint16_t *)(ht + (cflags & 0x7f));
++        cflags = (uint8_t)t;
++        x = (uint8_t)(t >> 8);
++    }
++
++    if (hs->opcode2) {
++        ht = hde64_table + DELTA_PREFIXES;
++        if (ht[ht[opcode / 4] + (opcode % 4)] & pref)
++            hs->flags |= F_ERROR | F_ERROR_OPCODE;
++    }
++
++    if (cflags & C_MODRM) {
++        hs->flags |= F_MODRM;
++        hs->modrm = c = *p++;
++        hs->modrm_mod = m_mod = c >> 6;
++        hs->modrm_rm = m_rm = c & 7;
++        hs->modrm_reg = m_reg = (c & 0x3f) >> 3;
++
++        if (x && ((x << m_reg) & 0x80))
++            hs->flags |= F_ERROR | F_ERROR_OPCODE;
++
++        if (!hs->opcode2 && opcode >= 0xd9 && opcode <= 0xdf) {
++            uint8_t t = opcode - 0xd9;
++            if (m_mod == 3) {
++                ht = hde64_table + DELTA_FPU_MODRM + t*8;
++                t = ht[m_reg] << m_rm;
++            } else {
++                ht = hde64_table + DELTA_FPU_REG;
++                t = ht[t] << m_reg;
++            }
++            if (t & 0x80)
++                hs->flags |= F_ERROR | F_ERROR_OPCODE;
++        }
++
++        if (pref & PRE_LOCK) {
++            if (m_mod == 3) {
++                hs->flags |= F_ERROR | F_ERROR_LOCK;
++            } else {
++                uint8_t *table_end, op = opcode;
++                if (hs->opcode2) {
++                    ht = hde64_table + DELTA_OP2_LOCK_OK;
++                    table_end = ht + DELTA_OP_ONLY_MEM - DELTA_OP2_LOCK_OK;
++                } else {
++                    ht = hde64_table + DELTA_OP_LOCK_OK;
++                    table_end = ht + DELTA_OP2_LOCK_OK - DELTA_OP_LOCK_OK;
++                    op &= -2;
++                }
++                for (; ht != table_end; ht++)
++                    if (*ht++ == op) {
++                        if (!((*ht << m_reg) & 0x80))
++                            goto no_lock_error;
++                        else
++                            break;
++                    }
++                hs->flags |= F_ERROR | F_ERROR_LOCK;
++              no_lock_error:
++                ;
++            }
++        }
++
++        if (hs->opcode2) {
++            switch (opcode) {
++                case 0x20: case 0x22:
++                    m_mod = 3;
++                    if (m_reg > 4 || m_reg == 1)
++                        goto error_operand;
++                    else
++                        goto no_error_operand;
++                case 0x21: case 0x23:
++                    m_mod = 3;
++                    if (m_reg == 4 || m_reg == 5)
++                        goto error_operand;
++                    else
++                        goto no_error_operand;
++            }
++        } else {
++            switch (opcode) {
++                case 0x8c:
++                    if (m_reg > 5)
++                        goto error_operand;
++                    else
++                        goto no_error_operand;
++                case 0x8e:
++                    if (m_reg == 1 || m_reg > 5)
++                        goto error_operand;
++                    else
++                        goto no_error_operand;
++            }
++        }
++
++        if (m_mod == 3) {
++            uint8_t *table_end;
++            if (hs->opcode2) {
++                ht = hde64_table + DELTA_OP2_ONLY_MEM;
++                table_end = ht + sizeof(hde64_table) - DELTA_OP2_ONLY_MEM;
++            } else {
++                ht = hde64_table + DELTA_OP_ONLY_MEM;
++                table_end = ht + DELTA_OP2_ONLY_MEM - DELTA_OP_ONLY_MEM;
++            }
++            for (; ht != table_end; ht += 2)
++                if (*ht++ == opcode) {
++                    if (*ht++ & pref && !((*ht << m_reg) & 0x80))
++                        goto error_operand;
++                    else
++                        break;
++                }
++            goto no_error_operand;
++        } else if (hs->opcode2) {
++            switch (opcode) {
++                case 0x50: case 0xd7: case 0xf7:
++                    if (pref & (PRE_NONE | PRE_66))
++                        goto error_operand;
++                    break;
++                case 0xd6:
++                    if (pref & (PRE_F2 | PRE_F3))
++                        goto error_operand;
++                    break;
++                case 0xc5:
++                    goto error_operand;
++            }
++            goto no_error_operand;
++        } else
++            goto no_error_operand;
++
++      error_operand:
++        hs->flags |= F_ERROR | F_ERROR_OPERAND;
++      no_error_operand:
++
++        c = *p++;
++        if (m_reg <= 1) {
++            if (opcode == 0xf6)
++                cflags |= C_IMM8;
++            else if (opcode == 0xf7)
++                cflags |= C_IMM_P66;
++        }
++
++        switch (m_mod) {
++            case 0:
++                if (pref & PRE_67) {
++                    if (m_rm == 6)
++                        disp_size = 2;
++                } else
++                    if (m_rm == 5)
++                        disp_size = 4;
++                break;
++            case 1:
++                disp_size = 1;
++                break;
++            case 2:
++                disp_size = 2;
++                if (!(pref & PRE_67))
++                    disp_size <<= 1;
++        }
++
++        if (m_mod != 3 && m_rm == 4) {
++            hs->flags |= F_SIB;
++            p++;
++            hs->sib = c;
++            hs->sib_scale = c >> 6;
++            hs->sib_index = (c & 0x3f) >> 3;
++            if ((hs->sib_base = c & 7) == 5 && !(m_mod & 1))
++                disp_size = 4;
++        }
++
++        p--;
++        switch (disp_size) {
++            case 1:
++                hs->flags |= F_DISP8;
++                hs->disp.disp8 = *p;
++                break;
++            case 2:
++                hs->flags |= F_DISP16;
++                hs->disp.disp16 = *(uint16_t *)p;
++                break;
++            case 4:
++                hs->flags |= F_DISP32;
++                hs->disp.disp32 = *(uint32_t *)p;
++        }
++        p += disp_size;
++    } else if (pref & PRE_LOCK)
++        hs->flags |= F_ERROR | F_ERROR_LOCK;
++
++    if (cflags & C_IMM_P66) {
++        if (cflags & C_REL32) {
++            if (pref & PRE_66) {
++                hs->flags |= F_IMM16 | F_RELATIVE;
++                hs->imm.imm16 = *(uint16_t *)p;
++                p += 2;
++                goto disasm_done;
++            }
++            goto rel32_ok;
++        }
++        if (op64) {
++            hs->flags |= F_IMM64;
++            hs->imm.imm64 = *(uint64_t *)p;
++            p += 8;
++        } else if (!(pref & PRE_66)) {
++            hs->flags |= F_IMM32;
++            hs->imm.imm32 = *(uint32_t *)p;
++            p += 4;
++        } else
++            goto imm16_ok;
++    }
++
++
++    if (cflags & C_IMM16) {
++      imm16_ok:
++        hs->flags |= F_IMM16;
++        hs->imm.imm16 = *(uint16_t *)p;
++        p += 2;
++    }
++    if (cflags & C_IMM8) {
++        hs->flags |= F_IMM8;
++        hs->imm.imm8 = *p++;
++    }
++
++    if (cflags & C_REL32) {
++      rel32_ok:
++        hs->flags |= F_IMM32 | F_RELATIVE;
++        hs->imm.imm32 = *(uint32_t *)p;
++        p += 4;
++    } else if (cflags & C_REL8) {
++        hs->flags |= F_IMM8 | F_RELATIVE;
++        hs->imm.imm8 = *p++;
++    }
++
++  disasm_done:
++
++    if ((hs->len = (uint8_t)(p-(uint8_t *)code)) > 15) {
++        hs->flags |= F_ERROR | F_ERROR_LENGTH;
++        hs->len = 15;
++    }
++
++    return (unsigned int)hs->len;
++}
++
++#endif // defined(_M_X64) || defined(__x86_64__)
+diff --git a/src/xrt/drivers/steamvr_lh/relations/hde/hde64.h b/src/xrt/drivers/steamvr_lh/relations/hde/hde64.h
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/hde/hde64.h
+@@ -0,0 +1,113 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Hacker Disassembler Engine 64
++ * Copyright (c) 2008-2009, Vyacheslav Patkov.
++ * All rights reserved.
++ *
++ * hde64.h: C/C++ header file
++ *
++ */
++
++#ifndef _HDE64_H_
++#define _HDE64_H_
++
++/* stdint.h - C99 standard header
++ * http://en.wikipedia.org/wiki/stdint.h
++ *
++ * if your compiler doesn't contain "stdint.h" header (for
++ * example, Microsoft Visual C++), you can download file:
++ *   http://www.azillionmonkeys.com/qed/pstdint.h
++ * and change next line to:
++ *   #include <stdint.h>
++ */
++#include <stdint.h>
++
++#define F_MODRM         0x00000001
++#define F_SIB           0x00000002
++#define F_IMM8          0x00000004
++#define F_IMM16         0x00000008
++#define F_IMM32         0x00000010
++#define F_IMM64         0x00000020
++#define F_DISP8         0x00000040
++#define F_DISP16        0x00000080
++#define F_DISP32        0x00000100
++#define F_RELATIVE      0x00000200
++#define F_ERROR         0x00001000
++#define F_ERROR_OPCODE  0x00002000
++#define F_ERROR_LENGTH  0x00004000
++#define F_ERROR_LOCK    0x00008000
++#define F_ERROR_OPERAND 0x00010000
++#define F_PREFIX_REPNZ  0x01000000
++#define F_PREFIX_REPX   0x02000000
++#define F_PREFIX_REP    0x03000000
++#define F_PREFIX_66     0x04000000
++#define F_PREFIX_67     0x08000000
++#define F_PREFIX_LOCK   0x10000000
++#define F_PREFIX_SEG    0x20000000
++#define F_PREFIX_REX    0x40000000
++#define F_PREFIX_ANY    0x7f000000
++
++#define PREFIX_SEGMENT_CS   0x2e
++#define PREFIX_SEGMENT_SS   0x36
++#define PREFIX_SEGMENT_DS   0x3e
++#define PREFIX_SEGMENT_ES   0x26
++#define PREFIX_SEGMENT_FS   0x64
++#define PREFIX_SEGMENT_GS   0x65
++#define PREFIX_LOCK         0xf0
++#define PREFIX_REPNZ        0xf2
++#define PREFIX_REPX         0xf3
++#define PREFIX_OPERAND_SIZE 0x66
++#define PREFIX_ADDRESS_SIZE 0x67
++
++#pragma pack(push,1)
++
++typedef struct {
++    uint8_t len;
++    uint8_t p_rep;
++    uint8_t p_lock;
++    uint8_t p_seg;
++    uint8_t p_66;
++    uint8_t p_67;
++    uint8_t rex;
++    uint8_t rex_w;
++    uint8_t rex_r;
++    uint8_t rex_x;
++    uint8_t rex_b;
++    uint8_t opcode;
++    uint8_t opcode2;
++    uint8_t modrm;
++    uint8_t modrm_mod;
++    uint8_t modrm_reg;
++    uint8_t modrm_rm;
++    uint8_t sib;
++    uint8_t sib_scale;
++    uint8_t sib_index;
++    uint8_t sib_base;
++    union {
++        uint8_t imm8;
++        uint16_t imm16;
++        uint32_t imm32;
++        uint64_t imm64;
++    } imm;
++    union {
++        uint8_t disp8;
++        uint16_t disp16;
++        uint32_t disp32;
++    } disp;
++    uint32_t flags;
++} hde64s;
++
++#pragma pack(pop)
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* __cdecl */
++unsigned int hde64_disasm(const void *code, hde64s *hs);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _HDE64_H_ */
+diff --git a/src/xrt/drivers/steamvr_lh/relations/hde/table64.h b/src/xrt/drivers/steamvr_lh/relations/hde/table64.h
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/hde/table64.h
+@@ -0,0 +1,75 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Hacker Disassembler Engine 64 C
++ * Copyright (c) 2008-2009, Vyacheslav Patkov.
++ * All rights reserved.
++ *
++ */
++
++#define C_NONE    0x00
++#define C_MODRM   0x01
++#define C_IMM8    0x02
++#define C_IMM16   0x04
++#define C_IMM_P66 0x10
++#define C_REL8    0x20
++#define C_REL32   0x40
++#define C_GROUP   0x80
++#define C_ERROR   0xff
++
++#define PRE_ANY  0x00
++#define PRE_NONE 0x01
++#define PRE_F2   0x02
++#define PRE_F3   0x04
++#define PRE_66   0x08
++#define PRE_67   0x10
++#define PRE_LOCK 0x20
++#define PRE_SEG  0x40
++#define PRE_ALL  0xff
++
++#define DELTA_OPCODES      0x4a
++#define DELTA_FPU_REG      0xfd
++#define DELTA_FPU_MODRM    0x104
++#define DELTA_PREFIXES     0x13c
++#define DELTA_OP_LOCK_OK   0x1ae
++#define DELTA_OP2_LOCK_OK  0x1c6
++#define DELTA_OP_ONLY_MEM  0x1d8
++#define DELTA_OP2_ONLY_MEM 0x1e7
++
++unsigned char hde64_table[] = {
++  0xa5,0xaa,0xa5,0xb8,0xa5,0xaa,0xa5,0xaa,0xa5,0xb8,0xa5,0xb8,0xa5,0xb8,0xa5,
++  0xb8,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xac,0xc0,0xcc,0xc0,0xa1,0xa1,
++  0xa1,0xa1,0xb1,0xa5,0xa5,0xa6,0xc0,0xc0,0xd7,0xda,0xe0,0xc0,0xe4,0xc0,0xea,
++  0xea,0xe0,0xe0,0x98,0xc8,0xee,0xf1,0xa5,0xd3,0xa5,0xa5,0xa1,0xea,0x9e,0xc0,
++  0xc0,0xc2,0xc0,0xe6,0x03,0x7f,0x11,0x7f,0x01,0x7f,0x01,0x3f,0x01,0x01,0xab,
++  0x8b,0x90,0x64,0x5b,0x5b,0x5b,0x5b,0x5b,0x92,0x5b,0x5b,0x76,0x90,0x92,0x92,
++  0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x6a,0x73,0x90,
++  0x5b,0x52,0x52,0x52,0x52,0x5b,0x5b,0x5b,0x5b,0x77,0x7c,0x77,0x85,0x5b,0x5b,
++  0x70,0x5b,0x7a,0xaf,0x76,0x76,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,0x5b,
++  0x5b,0x5b,0x86,0x01,0x03,0x01,0x04,0x03,0xd5,0x03,0xd5,0x03,0xcc,0x01,0xbc,
++  0x03,0xf0,0x03,0x03,0x04,0x00,0x50,0x50,0x50,0x50,0xff,0x20,0x20,0x20,0x20,
++  0x01,0x01,0x01,0x01,0xc4,0x02,0x10,0xff,0xff,0xff,0x01,0x00,0x03,0x11,0xff,
++  0x03,0xc4,0xc6,0xc8,0x02,0x10,0x00,0xff,0xcc,0x01,0x01,0x01,0x00,0x00,0x00,
++  0x00,0x01,0x01,0x03,0x01,0xff,0xff,0xc0,0xc2,0x10,0x11,0x02,0x03,0x01,0x01,
++  0x01,0xff,0xff,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0xff,0xff,0xff,0xff,0x10,
++  0x10,0x10,0x10,0x02,0x10,0x00,0x00,0xc6,0xc8,0x02,0x02,0x02,0x02,0x06,0x00,
++  0x04,0x00,0x02,0xff,0x00,0xc0,0xc2,0x01,0x01,0x03,0x03,0x03,0xca,0x40,0x00,
++  0x0a,0x00,0x04,0x00,0x00,0x00,0x00,0x7f,0x00,0x33,0x01,0x00,0x00,0x00,0x00,
++  0x00,0x00,0xff,0xbf,0xff,0xff,0x00,0x00,0x00,0x00,0x07,0x00,0x00,0xff,0x00,
++  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,
++  0x00,0x00,0x00,0xbf,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0x00,0x00,
++  0xff,0x40,0x40,0x40,0x40,0x41,0x49,0x40,0x40,0x40,0x40,0x4c,0x42,0x40,0x40,
++  0x40,0x40,0x40,0x40,0x40,0x40,0x4f,0x44,0x53,0x40,0x40,0x40,0x44,0x57,0x43,
++  0x5c,0x40,0x60,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
++  0x40,0x40,0x64,0x66,0x6e,0x6b,0x40,0x40,0x6a,0x46,0x40,0x40,0x44,0x46,0x40,
++  0x40,0x5b,0x44,0x40,0x40,0x00,0x00,0x00,0x00,0x06,0x06,0x06,0x06,0x01,0x06,
++  0x06,0x02,0x06,0x06,0x00,0x06,0x00,0x0a,0x0a,0x00,0x00,0x00,0x02,0x07,0x07,
++  0x06,0x02,0x0d,0x06,0x06,0x06,0x0e,0x05,0x05,0x02,0x02,0x00,0x00,0x04,0x04,
++  0x04,0x04,0x05,0x06,0x06,0x06,0x00,0x00,0x00,0x0e,0x00,0x00,0x08,0x00,0x10,
++  0x00,0x18,0x00,0x20,0x00,0x28,0x00,0x30,0x00,0x80,0x01,0x82,0x01,0x86,0x00,
++  0xf6,0xcf,0xfe,0x3f,0xab,0x00,0xb0,0x00,0xb1,0x00,0xb3,0x00,0xba,0xf8,0xbb,
++  0x00,0xc0,0x00,0xc1,0x00,0xc7,0xbf,0x62,0xff,0x00,0x8d,0xff,0x00,0xc4,0xff,
++  0x00,0xc5,0xff,0x00,0xff,0xff,0xeb,0x01,0xff,0x0e,0x12,0x08,0x00,0x13,0x09,
++  0x00,0x16,0x08,0x00,0x17,0x09,0x00,0x2b,0x09,0x00,0xae,0xff,0x07,0xb2,0xff,
++  0x00,0xb4,0xff,0x00,0xb5,0xff,0x00,0xc3,0x01,0x00,0xc7,0xff,0xbf,0xe7,0x08,
++  0x00,0xf0,0x02,0x00
++};
+diff --git a/src/xrt/drivers/steamvr_lh/relations/hook.h b/src/xrt/drivers/steamvr_lh/relations/hook.h
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/hook.h
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: MIT
++// Derived from QuestLHSync, Copyright (c) 2026 CreoleVR. See LICENSE.
++#pragma once
++namespace lh_relations {
++enum MH_STATUS { MH_OK = 0, MH_ERROR_NOT_INITIALIZED = -1, MH_ERROR_UNSUPPORTED_FUNCTION = -2, MH_ERROR_MEMORY_ALLOC = -3,
++                 MH_ERROR_MEMORY_PROTECT = -4, MH_ERROR_NOT_CREATED = -5 };
++MH_STATUS MH_Initialize();
++MH_STATUS MH_Uninitialize();
++// pOriginal receives a function that runs the original; fails (MH_ERROR_UNSUPPORTED_FUNCTION) when the function's
++// first bytes can't be moved (position-dependent instructions, or a body shorter than the 5 bytes the jump takes)
++MH_STATUS MH_CreateHook(void *target, void *detour, void **original);
++MH_STATUS MH_EnableHook(void *target);
++MH_STATUS MH_DisableHook(void *target);
++} // namespace lh_relations
+diff --git a/src/xrt/drivers/steamvr_lh/relations/hook_linux.cpp b/src/xrt/drivers/steamvr_lh/relations/hook_linux.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/hook_linux.cpp
+@@ -0,0 +1,166 @@
++// SPDX-License-Identifier: MIT
++// Derived from QuestLHSync, Copyright (c) 2026 CreoleVR. See LICENSE.
++// x86-64 Linux inline hooks with MinHook's calls (hook.h). The target's first instructions are copied (whole
++// instructions, lengths from HDE) into a trampoline that jumps back behind them, and replaced by a 5-byte relative jump
++// to a relay near the target, which jumps on to the detour (which can be anywhere in the address space).
++// Only instructions that don't depend on their own address can be moved: a function starting with a relative jump or
++// a rip-relative access is refused (MH_ERROR_UNSUPPORTED_FUNCTION), and so is one shorter than the jump.
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <mutex>
++
++#include "hde/hde64.h"
++#include "hook.h"
++
++namespace lh_relations {
++
++namespace {
++struct Hook {
++  uint8_t *target;
++  uint8_t saved[16];
++  size_t stolen;
++  uint8_t jump[8];  // what Enable writes at the target: jmp rel32, then the bytes after it, restored as they were
++  void *trampoline, *detour;
++  bool on;
++};
++
++std::mutex g_m;
++std::map<void *, Hook> g_hooks;
++bool g_init;
++
++// a page within +-1.5 GB of addr, for the relay and the trampoline
++uint8_t *NearPage(uint8_t *addr) {
++  const intptr_t page = sysconf(_SC_PAGESIZE), span = 0x60000000;
++  intptr_t base = (intptr_t)addr & ~(page - 1);
++  for (intptr_t d = 0; d < span; d += 16 * page)
++    for (int sign : {1, -1}) {
++      intptr_t want = base + sign * d;
++      if (want <= 0x10000) continue;
++      void *p = mmap((void *)want, page, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
++      if (p == MAP_FAILED) continue;
++      if (llabs((intptr_t)p - (intptr_t)addr) < span) return (uint8_t *)p;
++      munmap(p, page);
++    }
++  return nullptr;
++}
++
++void AbsJump(uint8_t *at, const void *to) {  // jmp [rip+0]; .quad to
++  at[0] = 0xFF; at[1] = 0x25;
++  memset(at + 2, 0, 4);
++  memcpy(at + 6, &to, 8);
++}
++
++bool Protect(void *addr, size_t n, int prot) {
++  long page = sysconf(_SC_PAGESIZE);
++  uintptr_t a = (uintptr_t)addr & ~(uintptr_t)(page - 1), e = ((uintptr_t)addr + n + page - 1) & ~(uintptr_t)(page - 1);
++  return mprotect((void *)a, e - a, prot) == 0;
++}
++}  // namespace
++
++MH_STATUS MH_Initialize() {
++  std::lock_guard<std::mutex> g(g_m);
++  g_init = true;
++  return MH_OK;
++}
++
++MH_STATUS MH_Uninitialize() {
++  std::lock_guard<std::mutex> g(g_m);
++  for (auto &kv : g_hooks)
++    if (kv.second.on) {
++      Hook &h = kv.second;
++      if (Protect(h.target, 8, PROT_READ | PROT_WRITE | PROT_EXEC)) {
++        memcpy(h.target, h.saved, 5);
++        Protect(h.target, 8, PROT_READ | PROT_EXEC);
++      }
++      h.on = false;
++    }
++  // relays and trampolines stay mapped: a thread may still be inside one
++  g_init = false;
++  return MH_OK;
++}
++
++MH_STATUS MH_CreateHook(void *target_, void *detour, void **original) {
++  std::lock_guard<std::mutex> g(g_m);
++  if (!g_init) return MH_ERROR_NOT_INITIALIZED;
++  auto *target = (uint8_t *)target_;
++  auto old = g_hooks.find(target_);
++  if (old != g_hooks.end()) {
++    // A runtime can destroy and recreate its Lighthouse Context in one process.
++    // The nodelete plugin and its trampolines remain mapped between sessions.
++    if (old->second.on || old->second.detour != detour) return MH_ERROR_UNSUPPORTED_FUNCTION;
++    if (original) *original = old->second.trampoline;
++    return MH_OK;
++  }
++  size_t len = 0;
++  while (len < 5) {
++    hde64s s;
++    if (!hde64_disasm(target + len, &s) || (s.flags & (F_ERROR | F_RELATIVE))) return MH_ERROR_UNSUPPORTED_FUNCTION;
++    if (s.flags & F_MODRM && s.modrm_mod == 0 && s.modrm_rm == 5) return MH_ERROR_UNSUPPORTED_FUNCTION;  // rip-relative
++    if (s.opcode == 0xC3 || s.opcode == 0xC2 || s.opcode == 0xCC) return MH_ERROR_UNSUPPORTED_FUNCTION;  // returns in it
++    len += s.len;
++  }
++  if (len > 15) return MH_ERROR_UNSUPPORTED_FUNCTION;
++  uint8_t *page = NearPage(target);
++  if (!page) return MH_ERROR_MEMORY_ALLOC;
++  uint8_t *relay = page, *tramp = page + 32;
++  AbsJump(relay, detour);
++  memcpy(tramp, target, len);
++  AbsJump(tramp + len, target + len);
++  Hook h{};
++  h.target = target;
++  h.trampoline = tramp;
++  h.detour = detour;
++  memcpy(h.saved, target, 16);
++  h.stolen = len;
++  h.jump[0] = 0xE9;
++  int32_t rel = (int32_t)(relay - (target + 5));
++  memcpy(h.jump + 1, &rel, 4);
++  memcpy(h.jump + 5, target + 5, 3);
++  if (original) *original = tramp;
++  g_hooks[target_] = h;
++  return MH_OK;
++}
++
++MH_STATUS MH_EnableHook(void *target) {
++  std::lock_guard<std::mutex> g(g_m);
++  auto it = g_hooks.find(target);
++  if (it == g_hooks.end()) return MH_ERROR_NOT_CREATED;
++  Hook &h = it->second;
++  if (h.on) return MH_OK;
++  if (!Protect(h.target, 8, PROT_READ | PROT_WRITE | PROT_EXEC)) return MH_ERROR_MEMORY_PROTECT;
++  // one aligned-enough 8-byte store when the bytes sit in one cache line: a thread entering the function sees either
++  // the old bytes or the whole jump
++  if (((uintptr_t)h.target & 63) <= 56) {
++    uint64_t v;
++    memcpy(&v, h.jump, 8);
++    __atomic_store_n((uint64_t *)h.target, v, __ATOMIC_RELEASE);
++  } else {
++    memcpy(h.target, h.jump, 5);
++  }
++  Protect(h.target, 8, PROT_READ | PROT_EXEC);
++  h.on = true;
++  return MH_OK;
++}
++
++MH_STATUS MH_DisableHook(void *target) {
++  std::lock_guard<std::mutex> g(g_m);
++  auto it = g_hooks.find(target);
++  if (it == g_hooks.end()) return MH_ERROR_NOT_CREATED;
++  Hook &h = it->second;
++  if (!h.on) return MH_OK;
++  if (!Protect(h.target, 8, PROT_READ | PROT_WRITE | PROT_EXEC)) return MH_ERROR_MEMORY_PROTECT;
++  uint64_t v;
++  memcpy(&v, h.saved, 8);
++  if (((uintptr_t)h.target & 63) <= 56) __atomic_store_n((uint64_t *)h.target, v, __ATOMIC_RELEASE);
++  else memcpy(h.target, h.saved, 5);
++  Protect(h.target, 8, PROT_READ | PROT_EXEC);
++  h.on = false;
++  return MH_OK;
++}
++
++} // namespace lh_relations
+diff --git a/src/xrt/drivers/steamvr_lh/relations/json.h b/src/xrt/drivers/steamvr_lh/relations/json.h
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/json.h
+@@ -0,0 +1,142 @@
++// SPDX-License-Identifier: MIT
++// Derived from QuestLHSync, Copyright (c) 2026 CreoleVR. See LICENSE.
++// Minimal JSON reader for persisted Lighthouse relationship measurements.
++#pragma once
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace lh_relations {
++
++struct JVal {
++  enum Type { Null, Bool, Num, Str, Arr, Obj } t = Null;
++  double n = 0;
++  bool b = false;
++  std::string s;
++  std::vector<JVal> a;
++  std::vector<std::pair<std::string, JVal>> o;
++
++  const JVal *get(const char *k) const {
++    if (t != Obj) return nullptr;
++    for (auto &kv : o)
++      if (kv.first == k) return &kv.second;
++    return nullptr;
++  }
++  double num(double def = 0) const { return t == Num ? n : def; }
++  // numeric array -> doubles (empty if not one)
++  std::vector<double> nums() const {
++    std::vector<double> v;
++    if (t == Arr)
++      for (auto &e : a) v.push_back(e.num());
++    return v;
++  }
++};
++
++class JParser {
++ public:
++  JParser(const char *p, size_t n) : p_(p), e_(p + n) {}
++  bool Parse(JVal &v) {
++    if (!Value(v, 0)) return false;
++    Ws();
++    return p_ == e_;
++  }
++
++ private:
++  const char *p_, *e_;
++  void Ws() {
++    while (p_ < e_ && (*p_ == ' ' || *p_ == '\t' || *p_ == '\n' || *p_ == '\r')) p_++;
++  }
++  bool Lit(const char *w) {
++    size_t n = strlen(w);
++    if ((size_t)(e_ - p_) < n || memcmp(p_, w, n)) return false;
++    p_ += n;
++    return true;
++  }
++  bool String(std::string &s) {
++    if (p_ >= e_ || *p_ != '"') return false;
++    p_++;
++    while (p_ < e_ && *p_ != '"') {
++      char c = *p_++;
++      if (c != '\\') { s += c; continue; }
++      if (p_ >= e_) return false;
++      c = *p_++;
++      switch (c) {
++        case 'n': s += '\n'; break;
++        case 't': s += '\t'; break;
++        case 'r': s += '\r'; break;
++        case 'b': s += '\b'; break;
++        case 'f': s += '\f'; break;
++        case 'u': {
++          if (e_ - p_ < 4) return false;
++          unsigned u = (unsigned)strtoul(std::string(p_, 4).c_str(), nullptr, 16);
++          p_ += 4;
++          if (u < 0x80) s += (char)u;
++          else if (u < 0x800) { s += (char)(0xC0 | (u >> 6)); s += (char)(0x80 | (u & 63)); }
++          else { s += (char)(0xE0 | (u >> 12)); s += (char)(0x80 | ((u >> 6) & 63)); s += (char)(0x80 | (u & 63)); }
++          break;
++        }
++        default: s += c;
++      }
++    }
++    if (p_ >= e_) return false;
++    p_++;
++    return true;
++  }
++  bool Value(JVal &v, int depth) {
++    if (depth > 64) return false;
++    Ws();
++    if (p_ >= e_) return false;
++    char c = *p_;
++    if (c == '{') {
++      v.t = JVal::Obj;
++      p_++;
++      Ws();
++      if (p_ < e_ && *p_ == '}') { p_++; return true; }
++      for (;;) {
++        Ws();
++        std::string k;
++        if (!String(k)) return false;
++        Ws();
++        if (p_ >= e_ || *p_++ != ':') return false;
++        v.o.emplace_back(std::move(k), JVal());
++        if (!Value(v.o.back().second, depth + 1)) return false;
++        Ws();
++        if (p_ < e_ && *p_ == ',') { p_++; continue; }
++        if (p_ < e_ && *p_ == '}') { p_++; return true; }
++        return false;
++      }
++    }
++    if (c == '[') {
++      v.t = JVal::Arr;
++      p_++;
++      Ws();
++      if (p_ < e_ && *p_ == ']') { p_++; return true; }
++      for (;;) {
++        v.a.emplace_back();
++        if (!Value(v.a.back(), depth + 1)) return false;
++        Ws();
++        if (p_ < e_ && *p_ == ',') { p_++; continue; }
++        if (p_ < e_ && *p_ == ']') { p_++; return true; }
++        return false;
++      }
++    }
++    if (c == '"') { v.t = JVal::Str; return String(v.s); }
++    if (Lit("true")) { v.t = JVal::Bool; v.b = true; return true; }
++    if (Lit("false")) { v.t = JVal::Bool; return true; }
++    if (Lit("null")) return true;
++    char tmp[64];
++    size_t n = 0;
++    while (p_ < e_ && n < sizeof tmp - 1 && strchr("+-0123456789.eE", *p_)) tmp[n++] = *p_++;
++    if (!n) return false;
++    tmp[n] = 0;
++    v.t = JVal::Num;
++    v.n = strtod(tmp, nullptr);
++    return true;
++  }
++};
++
++inline bool JParse(const std::string &text, JVal &v) { return JParser(text.data(), text.size()).Parse(v); }
++
++} // namespace lh_relations
+diff --git a/src/xrt/drivers/steamvr_lh/relations/mathx.h b/src/xrt/drivers/steamvr_lh/relations/mathx.h
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/mathx.h
+@@ -0,0 +1,140 @@
++// SPDX-License-Identifier: MIT
++// Derived from QuestLHSync, Copyright (c) 2026 CreoleVR. See LICENSE.
++// Small 3D math for base station relationship averaging: vectors, row-major 3x3 matrices, unit quaternions (w x y z)
++#pragma once
++#include <cmath>
++
++namespace lh_relations {
++
++struct V3 {
++  double x = 0, y = 0, z = 0;
++  double &operator[](int i) { return (&x)[i]; }
++  double operator[](int i) const { return (&x)[i]; }
++};
++inline V3 operator+(V3 a, V3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
++inline V3 operator-(V3 a, V3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
++inline V3 operator*(V3 a, double s) { return {a.x * s, a.y * s, a.z * s}; }
++inline V3 operator*(double s, V3 a) { return a * s; }
++inline V3 &operator+=(V3 &a, V3 b) { a.x += b.x; a.y += b.y; a.z += b.z; return a; }
++inline double dot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
++inline V3 cross(V3 a, V3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
++inline double norm(V3 a) { return std::sqrt(dot(a, a)); }
++
++struct M3 {
++  double m[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
++  V3 col(int c) const { return {m[0][c], m[1][c], m[2][c]}; }
++};
++inline V3 operator*(const M3 &R, V3 v) {
++  return {R.m[0][0] * v.x + R.m[0][1] * v.y + R.m[0][2] * v.z, R.m[1][0] * v.x + R.m[1][1] * v.y + R.m[1][2] * v.z,
++          R.m[2][0] * v.x + R.m[2][1] * v.y + R.m[2][2] * v.z};
++}
++inline M3 operator*(const M3 &a, const M3 &b) {
++  M3 r;
++  for (int i = 0; i < 3; i++)
++    for (int j = 0; j < 3; j++) r.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j];
++  return r;
++}
++inline M3 T(const M3 &a) {
++  M3 r;
++  for (int i = 0; i < 3; i++)
++    for (int j = 0; j < 3; j++) r.m[i][j] = a.m[j][i];
++  return r;
++}
++// rotation about +y (gravity): the 4-DOF alignment's yaw
++inline M3 Ry(double a) {
++  double c = std::cos(a), s = std::sin(a);
++  M3 r;
++  r.m[0][0] = c; r.m[0][1] = 0; r.m[0][2] = s;
++  r.m[1][0] = 0; r.m[1][1] = 1; r.m[1][2] = 0;
++  r.m[2][0] = -s; r.m[2][1] = 0; r.m[2][2] = c;
++  return r;
++}
++inline V3 RyMul(double c, double s, V3 v) { return {c * v.x + s * v.z, v.y, -s * v.x + c * v.z}; }
++// rotation by |(ax, 0, az)| rad about the horizontal axis along (ax, 0, az): a tilt, no turn about the vertical
++inline M3 Tilt(double ax, double az) {
++  double th = std::hypot(ax, az);
++  M3 r;
++  if (th < 1e-15) return r;
++  double x = ax / th, z = az / th, c = std::cos(th), s = std::sin(th), k = 1 - c;
++  r.m[0][0] = c + k * x * x; r.m[0][1] = -s * z;  r.m[0][2] = k * x * z;
++  r.m[1][0] = s * z;         r.m[1][1] = c;       r.m[1][2] = -s * x;
++  r.m[2][0] = k * x * z;     r.m[2][1] = s * x;   r.m[2][2] = c + k * z * z;
++  return r;
++}
++// angle of a rotation matrix (deg)
++inline double RotDeg(const M3 &R) {  // atan2 form: acos loses small angles
++  double c = (R.m[0][0] + R.m[1][1] + R.m[2][2] - 1) / 2;
++  double sx = R.m[2][1] - R.m[1][2], sy = R.m[0][2] - R.m[2][0], sz = R.m[1][0] - R.m[0][1];
++  return std::atan2(std::sqrt(sx * sx + sy * sy + sz * sz) / 2, c) * 57.29577951308232;
++}
++// how far a rotation matrix tilts the vertical (deg)
++inline double TiltDeg(const M3 &R) {
++  return std::atan2(std::hypot(R.m[0][1], R.m[2][1]), R.m[1][1]) * 57.29577951308232;
++}
++constexpr double kPi = 3.14159265358979323846;
++constexpr double kDeg = 180.0 / kPi;
++inline double Wrap(double a) {  // [-pi, pi)
++  a = std::fmod(a + kPi, 2 * kPi);
++  if (a < 0) a += 2 * kPi;
++  return a - kPi;
++}
++
++struct Quat {
++  double w = 1, x = 0, y = 0, z = 0;
++};
++inline Quat operator*(const Quat &a, const Quat &b) {
++  return {a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z, a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
++          a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x, a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w};
++}
++inline M3 ToM3(const Quat &q0) {  // normalizes (logged quaternions are rounded)
++  double n = std::sqrt(q0.w * q0.w + q0.x * q0.x + q0.y * q0.y + q0.z * q0.z);
++  double w = q0.w / n, x = q0.x / n, y = q0.y / n, z = q0.z / n;
++  M3 r;
++  r.m[0][0] = 1 - 2 * (y * y + z * z); r.m[0][1] = 2 * (x * y - z * w); r.m[0][2] = 2 * (x * z + y * w);
++  r.m[1][0] = 2 * (x * y + z * w); r.m[1][1] = 1 - 2 * (x * x + z * z); r.m[1][2] = 2 * (y * z - x * w);
++  r.m[2][0] = 2 * (x * z - y * w); r.m[2][1] = 2 * (y * z + x * w); r.m[2][2] = 1 - 2 * (x * x + y * y);
++  return r;
++}
++inline Quat ToQuat(const M3 &R) {
++  const auto &m = R.m;
++  double tr = m[0][0] + m[1][1] + m[2][2];
++  Quat q;
++  if (tr > 0) {
++    double s = std::sqrt(tr + 1.0) * 2;
++    q = {0.25 * s, (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s};
++  } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
++    double s = std::sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2;
++    q = {(m[2][1] - m[1][2]) / s, 0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s};
++  } else if (m[1][1] > m[2][2]) {
++    double s = std::sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2;
++    q = {(m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s};
++  } else {
++    double s = std::sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2;
++    q = {(m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s};
++  }
++  double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
++  return {q.w / n, q.x / n, q.y / n, q.z / n};
++}
++inline Quat Slerp(Quat a, Quat b, double s) {
++  double d = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
++  if (d < 0) { b = {-b.w, -b.x, -b.y, -b.z}; d = -d; }
++  double ka, kb;
++  if (d > 0.9999995) { ka = 1 - s; kb = s; }
++  else {
++    double th = std::acos(d), sn = std::sin(th);
++    ka = std::sin((1 - s) * th) / sn; kb = std::sin(s * th) / sn;
++  }
++  Quat q{ka * a.w + kb * b.w, ka * a.x + kb * b.x, ka * a.y + kb * b.y, ka * a.z + kb * b.z};
++  double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
++  return {q.w / n, q.x / n, q.y / n, q.z / n};
++}
++// angle between two unit quaternions (deg)
++inline double QuatDeg(const Quat &a, const Quat &b) {  // unit quaternions; atan2 form for small angles
++  double w = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;  // (conj(a) * b).w
++  double x = a.w * b.x - a.x * b.w - a.y * b.z + a.z * b.y;
++  double y = a.w * b.y + a.x * b.z - a.y * b.w - a.z * b.x;
++  double z = a.w * b.z - a.x * b.y + a.y * b.x - a.z * b.w;
++  return 2 * std::atan2(std::sqrt(x * x + y * y + z * z), std::fabs(w)) * 57.29577951308232;
++}
++
++} // namespace lh_relations
+diff --git a/src/xrt/drivers/steamvr_lh/relations/relations.cpp b/src/xrt/drivers/steamvr_lh/relations/relations.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/relations.cpp
+@@ -0,0 +1,378 @@
++// SPDX-License-Identifier: MIT
++// Derived from QuestLHSync, Copyright (c) 2026 CreoleVR. See LICENSE.
++#include <dlfcn.h>
++#ifdef LH_RELATIONS_X86_64
++#include <elf.h>
++#include <link.h>
++#endif
++
++#include "relations.h"
++
++#include <cmath>
++#include <cstdarg>
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <sstream>
++
++#include "hook.h"
++#include "os/os_time.h"
++#include "json.h"
++#include <filesystem>
++
++namespace lh_relations {
++
++namespace {
++
++uint64_t monotonic_ms() { return os_monotonic_get_ns() / 1000000; }
++
++// a relationship this far from the pair's average isn't averaged in, and a second one like it means the station moved
++// (one device's view is off by up to ~3 cm and 1.5 deg, rarely more)
++constexpr double kFarM = 0.15, kFarDeg = 2.5;
++constexpr double kAgreeM = 0.06, kAgreeDeg = 1.0;  // two far ones this close: the station's new place
++constexpr size_t kKeepRel = 30;                     // the newest relationships a pair keeps
++constexpr int kSayPerMin = 10;                      // log lines a minute at most
++constexpr uint64_t kSaveMs = 10000;                 // monado-relations.json written at most this often
++
++// the relationship step's log line, and how it begins in SteamVR's lighthouse driver (the Linux build's line goes on,
++// ", which is closer to the origin")
++const char kMoving[] = "Moving base %08X %.0fmm and %.1f deg because of relationship with %08X";
++
++RelationshipAverager *g_self;
++
++// System V: (this, a, b) in registers, the variance in xmm0, and the relationship, seven floats, by value on the
++// stack (the function reads it at rbp+0x10). A struct of those seven floats takes the same place
++struct Rel7 { float f[7]; };
++using RelFn = void (*)(void *, uint32_t, uint32_t, Rel7, float);
++RelFn g_orig;
++
++[[maybe_unused]] void Detour(void *self, uint32_t a, uint32_t b, Rel7 rel, float variance) {
++  Rel7 avg;
++  try {
++    if (g_self && g_self->Average(a, b, rel.f, avg.f)) rel = avg;
++  } catch (...) {
++  }
++  g_orig(self, a, b, rel, variance);
++}
++
++std::string Fmt(const char *fmt, ...) {
++  char buf[512];
++  va_list ap;
++  va_start(ap, fmt);
++  vsnprintf(buf, sizeof buf, fmt, ap);
++  va_end(ap);
++  return buf;
++}
++
++V3 Rot(const Quat &q, V3 v) { return ToM3(q) * v; }
++Quat Conj(const Quat &q) { return {q.w, -q.x, -q.y, -q.z}; }
++double Dot(const Quat &a, const Quat &b) { return a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z; }
++
++RelationshipAverager::Pose FromF(const float f[7]) { return {{f[3], f[0], f[1], f[2]}, {f[4], f[5], f[6]}}; }
++void ToF(const RelationshipAverager::Pose &p, float f[7]) {
++  f[0] = (float)p.q.x; f[1] = (float)p.q.y; f[2] = (float)p.q.z; f[3] = (float)p.q.w;
++  f[4] = (float)p.t.x; f[5] = (float)p.t.y; f[6] = (float)p.t.z;
++}
++
++bool Far(const RelationshipAverager::Pose &a, const RelationshipAverager::Pose &b, double m, double deg) {
++  return norm(a.t - b.t) > m || QuatDeg(a.q, b.q) > deg;
++}
++
++std::string Name(uint32_t s) { return Fmt("LHB-%08X", s); }
++
++}  // namespace
++
++RelationshipAverager::RelationshipAverager(std::string dir, LogFn log) : dir_(std::move(dir)), log_(std::move(log)) { Load(); }
++
++RelationshipAverager::Pose RelationshipAverager::Inv(const Pose &p) {
++  Quat c = Conj(p.q);
++  return {c, Rot(c, p.t) * -1.0};
++}
++
++RelationshipAverager::Pose RelationshipAverager::Mean(const std::vector<Pose> &v) {
++  Quat s{0, 0, 0, 0};
++  V3 t{};
++  for (auto &p : v) {
++    double k = Dot(p.q, v[0].q) < 0 ? -1 : 1;  // q and -q are the same turn
++    s = {s.w + k * p.q.w, s.x + k * p.q.x, s.y + k * p.q.y, s.z + k * p.q.z};
++    t += p.t;
++  }
++  double n = std::sqrt(Dot(s, s));
++  return {{s.w / n, s.x / n, s.y / n, s.z / n}, t * (1.0 / v.size())};
++}
++
++// module: the shared object's load address (its ELF header)
++void *RelationshipAverager::Find(void *module, std::string &why) {
++#ifndef LH_RELATIONS_X86_64
++  why = "requires x86-64 Linux";
++  return nullptr;
++#else
++  auto *base = (uint8_t *)module;
++  auto *eh = (const Elf64_Ehdr *)base;
++  auto *ph = (const Elf64_Phdr *)(base + eh->e_phoff);
++  // the log line in read-only data, then the code that loads it
++  const uint8_t *str = nullptr;
++  for (int i = 0; i < eh->e_phnum && !str; i++) {
++    if (ph[i].p_type != PT_LOAD || (ph[i].p_flags & PF_X) || !(ph[i].p_flags & PF_R)) continue;
++    const uint8_t *p = base + ph[i].p_vaddr, *e = p + ph[i].p_filesz;
++    for (; p + sizeof kMoving <= e; p++)
++      if (*p == 'M' && !memcmp(p, kMoving, sizeof kMoving - 1)) { str = p; break; }
++  }
++  if (!str) { why = "no base station move in it"; return nullptr; }
++  const uint8_t *ref = nullptr;
++  for (int i = 0; i < eh->e_phnum && !ref; i++) {
++    if (ph[i].p_type != PT_LOAD || !(ph[i].p_flags & PF_X)) continue;
++    const uint8_t *p = base + ph[i].p_vaddr, *e = p + ph[i].p_filesz;
++    for (; p + 7 <= e; p++) {
++      if ((p[0] != 0x48 && p[0] != 0x4C) || p[1] != 0x8D || (p[2] & 0xC7) != 0x05) continue;  // lea r, [rip+d]
++      int32_t d;
++      memcpy(&d, p + 3, 4);
++      if (p + 7 + d == str) { ref = p; break; }
++    }
++  }
++  if (!ref) { why = "nothing loads its move line"; return nullptr; }
++  // the function around it, from .eh_frame_hdr's sorted table: version 1, pc-relative eh_frame pointer, 4-byte count,
++  // (start, FDE) pairs relative to the table's start, sorted by start
++  const uint8_t *hdr = nullptr;
++  for (int i = 0; i < eh->e_phnum; i++)
++    if (ph[i].p_type == PT_GNU_EH_FRAME) hdr = base + ph[i].p_vaddr;
++  if (!hdr || hdr[0] != 1 || hdr[1] != 0x1B || hdr[2] != 0x03 || hdr[3] != 0x3B) {
++    why = "no unwind table it can read";
++    return nullptr;
++  }
++  uint32_t count;
++  memcpy(&count, hdr + 8, 4);
++  struct Ent { int32_t start, fde; };
++  auto *tab = (const Ent *)(hdr + 12);
++  const Ent *best = nullptr;
++  for (uint32_t lo = 0, hi = count; lo < hi;) {
++    uint32_t mid = (lo + hi) / 2;
++    if (hdr + tab[mid].start <= ref) { best = &tab[mid]; lo = mid + 1; }
++    else hi = mid;
++  }
++  if (!best) { why = "no unwind entry for its move"; return nullptr; }
++  // the FDE: length, CIE pointer, then pc-relative start and a 4-byte range (a CIE with another encoding is refused)
++  const uint8_t *fde = hdr + best->fde;
++  int32_t range;
++  memcpy(&range, fde + 12, 4);
++  uint8_t *fn = (uint8_t *)hdr + best->start;
++  if (range <= 0 || ref >= fn + range) { why = "no unwind entry for its move"; return nullptr; }
++  // its arguments: the relationship is on the stack (movss xmm, [rbp+0x10]) and the function sets up a frame pointer
++  bool stack_rel = false;
++  for (int k = 0; k + 6 < 0x80 && k < range - 6; k++)
++    if (fn[k] == 0xF3 && fn[k + 1] == 0x0F && fn[k + 2] == 0x10 && (fn[k + 3] & 0xC7) == 0x45 && fn[k + 4] == 0x10) stack_rel = true;
++  if (!stack_rel) { why = "its relationship step takes other arguments"; return nullptr; }
++  return fn;
++#endif
++}
++
++bool RelationshipAverager::Hook() {
++#ifndef LH_RELATIONS_X86_64
++  log_("Lighthouse relationship averaging requires x86-64 Linux: disabled");
++  return true;
++#else
++  if (target_) return true;
++  void *mod = nullptr;  // driver_lighthouse.so's load address, once SteamVR has loaded it
++  dl_iterate_phdr(
++      [](dl_phdr_info *i, size_t, void *out) {
++        std::string n = i->dlpi_name ? i->dlpi_name : "";
++        if (n.size() >= 20 && n.compare(n.size() - 20, 20, "driver_lighthouse.so") == 0) *(void **)out = (void *)i->dlpi_addr;
++        return 0;
++      },
++      &mod);
++  if (!mod) return false;
++  std::string why;
++  void *fn = Find(mod, why);
++  if (!fn) {
++    log_("SteamVR's lighthouse driver isn't one this version knows (" + why +
++         "): base stations placed as SteamVR places them");
++    return true;
++  }
++  if (g_self && g_self != this) {
++    log_("Lighthouse relationship averaging already belongs to another driver context");
++    return true;
++  }
++  MH_Initialize();
++  g_self = this;
++  if (MH_CreateHook(fn, (void *)&Detour, (void **)&g_orig) != MH_OK || MH_EnableHook(fn) != MH_OK) {
++    MH_Uninitialize();
++    g_self = nullptr;
++    log_("hooking SteamVR's base station placement failed: base stations placed as SteamVR places them");
++    return true;
++  }
++  target_ = fn;
++  size_t known = 0;
++  {
++    std::lock_guard<std::mutex> g(m_);
++    for (auto &kv : pairs_) known += kv.second.size();
++  }
++  log_(Fmt("base stations: SteamVR places them by the average of its measurements (%zu kept)", known));
++  return true;
++#endif
++}
++
++void RelationshipAverager::Unhook() {
++#ifdef LH_RELATIONS_X86_64
++  if (!target_) return;
++  MH_DisableHook(target_);
++  target_ = nullptr;
++  MH_Uninitialize();
++  g_self = nullptr;
++#endif
++}
++
++bool RelationshipAverager::Average(uint32_t a, uint32_t b, const float rel[7], float out[7]) {
++  if (!enabled_ || a == b || !a || !b) return false;
++  Pose p = FromF(rel);
++  double qn = Dot(p.q, p.q), d = norm(p.t);
++  if (!std::isfinite(qn + d) || std::fabs(qn - 1) > 0.02 || d < 0.2 || d > 50) {
++    std::lock_guard<std::mutex> g(m_);
++    if (!odd_said_)
++      Say(Fmt("base stations %s and %s: SteamVR's measurement of them doesn't read as a pose here (%.3g %.3g %.3g %.3g "
++              "%.3g %.3g %.3g): passed on as it is", Name(a).c_str(), Name(b).c_str(), rel[0], rel[1], rel[2], rel[3],
++              rel[4], rel[5], rel[6]));
++    odd_said_ = true;
++    return false;
++  }
++  p.q = {p.q.w / std::sqrt(qn), p.q.x / std::sqrt(qn), p.q.y / std::sqrt(qn), p.q.z / std::sqrt(qn)};
++  bool flip = a > b;  // kept as the lower serial's: a = rel * b
++  auto key = flip ? std::make_pair(b, a) : std::make_pair(a, b);
++  if (flip) p = Inv(p);
++  std::string pair = Name(key.first) + " and " + Name(key.second);
++  std::lock_guard<std::mutex> g(m_);
++  std::vector<Pose> &v = pairs_[key];
++  std::string said;
++  if (v.empty()) {
++    v.push_back(p);
++    said = Fmt("base stations %s: SteamVR's first measurement of them, kept for averaging", pair.c_str());
++  } else {
++    Pose m = Mean(v);
++    double cm = norm(p.t - m.t) * 100, deg = QuatDeg(p.q, m.q);
++    auto pend = pending_.find(key);
++    if (!Far(p, m, kFarM, kFarDeg)) {
++      v.push_back(p);
++      if (v.size() > kKeepRel) v.erase(v.begin());
++      if (pend != pending_.end()) pending_.erase(pend);
++      said = Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu, which it "
++                 "gets instead",
++                 pair.c_str(), cm, deg, v.size());
++    } else if (pend != pending_.end() && !Far(p, pend->second, kAgreeM, kAgreeDeg)) {
++      v = {pend->second, p};
++      pending_.erase(pend);
++      said = Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average twice: moved, "
++                 "averaging from the new place",
++                 pair.c_str(), cm, deg);
++    } else {
++      pending_[key] = p;
++      said = Fmt("base stations %s: SteamVR measured them %.1f cm and %.2f deg from the average of %zu: kept the "
++                 "average (another like it means a station moved)",
++                 pair.c_str(), cm, deg, v.size());
++    }
++  }
++  dirty_ = true;
++  Say(said);
++  Pose m = Mean(v);
++  if (flip) m = Inv(m);
++  ToF(m, out);
++  return true;
++}
++
++void RelationshipAverager::Roll(uint64_t now) {
++  if (now - say_t0_ < 60000) return;
++  if (say_skipped_) said_.push_back(Fmt("base stations: %d more lines like these not logged", say_skipped_));
++  say_t0_ = now;
++  say_n_ = say_skipped_ = 0;
++}
++
++void RelationshipAverager::Say(const std::string &s) {
++  Roll(monotonic_ms());
++  if (say_n_ < kSayPerMin) {
++    said_.push_back(s);
++    say_n_++;
++  } else {
++    say_skipped_++;
++  }
++}
++
++void RelationshipAverager::Flush(bool now) {
++  std::string s;
++  std::vector<std::string> said;
++  {
++    std::lock_guard<std::mutex> g(m_);
++    uint64_t t = monotonic_ms();
++    Roll(t);
++    if (dirty_ && (now || t - saved_t_ >= kSaveMs)) {
++      s = Json();
++      dirty_ = false;
++      saved_t_ = t;
++    }
++    said.swap(said_);
++  }
++  for (auto &l : said) log_(l);
++  if (s.empty()) return;
++  std::string path = dir_ + "/monado-relations.json", tmp = path + ".tmp";
++  std::error_code ec;
++  std::filesystem::create_directories(dir_, ec);
++  FILE *f = ec ? nullptr : fopen(tmp.c_str(), "wb");
++  bool saved = false;
++  if (f) {
++    bool written = fwrite(s.data(), 1, s.size(), f) == s.size();
++    bool closed = fclose(f) == 0;
++    saved = written && closed && (std::rename(tmp.c_str(), path.c_str()) == 0);
++  }
++  if (!saved) {
++    std::lock_guard<std::mutex> g(m_);
++    dirty_ = true; // retry; an unwritable state folder must not lose the in-memory estimator
++    Say("Lighthouse: could not save averaged relationships to " + path);
++  }
++}
++
++void RelationshipAverager::Load() {
++  std::ifstream f(dir_ + "/monado-relations.json", std::ios::binary);
++  if (!f) return;
++  std::stringstream ss;
++  ss << f.rdbuf();
++  JVal root;
++  if (!JParse(ss.str(), root)) return;
++  const JVal *pairs = root.get("pairs");
++  if (!pairs || pairs->t != JVal::Obj) return;
++  for (auto &kv : pairs->o) {
++    unsigned a = 0, b = 0;
++    if (sscanf(kv.first.c_str(), "LHB-%8X LHB-%8X", &a, &b) != 2 || a >= b || kv.second.t != JVal::Arr) continue;
++    std::vector<Pose> v;
++    for (auto &e : kv.second.a) {
++      auto x = e.nums();
++      if (x.size() != 7) continue;
++      float r[7];
++      for (int i = 0; i < 7; i++) r[i] = (float)x[i];
++      Pose p = FromF(r);
++      double qn = Dot(p.q, p.q), d = norm(p.t);
++      if (!std::isfinite(qn + d) || std::fabs(qn - 1) > 0.02 || d < 0.2 || d > 50) continue;
++      p.q = {p.q.w / std::sqrt(qn), p.q.x / std::sqrt(qn), p.q.y / std::sqrt(qn), p.q.z / std::sqrt(qn)};
++      v.push_back(p);
++    }
++    if (v.size() > kKeepRel) v.erase(v.begin(), v.end() - kKeepRel);
++    if (!v.empty()) pairs_[{a, b}] = v;
++  }
++}
++
++std::string RelationshipAverager::Json() const {
++  std::string s ="{\n \"note\": \"SteamVR's measurements of where its base stations sit relative to each other "
++                  "(qx qy qz qw tx ty tz): Monado has SteamVR place them by their average. Delete to start "
++                  "over.\",\n \"pairs\": {";
++  bool first = true;
++  for (auto &kv : pairs_) {
++    s += Fmt("%s\n  \"%s %s\": [", first ? "" : ",", Name(kv.first.first).c_str(), Name(kv.first.second).c_str());
++    for (size_t i = 0; i < kv.second.size(); i++) {
++      const Pose &p = kv.second[i];
++      s += Fmt("%s\n   [%.6f, %.6f, %.6f, %.6f, %.5f, %.5f, %.5f]", i ? "," : "", p.q.x, p.q.y, p.q.z, p.q.w, p.t.x,
++               p.t.y, p.t.z);
++    }
++    s += "\n  ]";
++    first = false;
++  }
++  s += "\n }\n}\n";
++  return s;
++}
++
++} // namespace lh_relations
+diff --git a/src/xrt/drivers/steamvr_lh/relations/relations.h b/src/xrt/drivers/steamvr_lh/relations/relations.h
+new file mode 100644
+--- /dev/null
++++ b/src/xrt/drivers/steamvr_lh/relations/relations.h
+@@ -0,0 +1,66 @@
++// SPDX-License-Identifier: MIT
++// Derived from QuestLHSync, Copyright (c) 2026 CreoleVR. See LICENSE.
++// SteamVR places every base station but the first from a "relationship": a device that has just found its pose sees
++// two stations, which says where they sit relative to each other. Each new one replaces the last, and one device's
++// view is off by centimetres and up to a degree or more, so SteamVR moves the station whenever a device finds its
++// tracking again (vrserver.txt: "Moving base ... because of relationship with ..."), and everything it tracks through
++// that station moves with it. This hooks that step in SteamVR's lighthouse driver and hands it the average of the
++// pair's relationships instead (kept across sessions in monado-relations.json).
++#pragma once
++#include <atomic>
++#include <cstdint>
++#include <map>
++#include <mutex>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "mathx.h"
++#include <functional>
++
++namespace lh_relations {
++
++using LogFn = std::function<void(const std::string &)>;
++class RelationshipAverager {
++ public:
++  RelationshipAverager(std::string dir, LogFn log);
++  void SetEnabled(bool on) { enabled_ = on; }
++  // hooks driver_lighthouse.so's relationship step. True once there's nothing more to try
++  // (hooked, or code this doesn't know), false while that library isn't loaded yet
++  bool Hook();
++  bool hooked() const { return target_ != nullptr; }
++  void Unhook();
++  // SteamVR's relationship of stations a and b (qx qy qz qw tx ty tz; a = rel * b) -> out, the one it gets instead;
++  // false: it keeps its own. Runs on SteamVR's tracking thread
++  bool Average(uint32_t a, uint32_t b, const float rel[7], float out[7]);
++  // logs what Average changed since the last call and writes monado-relations.json, at most every 10 s unless now (the
++  // driver's worker thread)
++  void Flush(bool now = false);
++
++  struct Pose { Quat q; V3 t; };
++  static Pose Inv(const Pose &p);
++  static Pose Mean(const std::vector<Pose> &v);
++  // the relationship step in a loaded driver_lighthouse.so, or null and why
++  static void *Find(void *module, std::string &why);
++
++ private:
++  std::string dir_;
++  LogFn log_;
++  std::atomic<bool> enabled_{true};
++  std::mutex m_;
++  std::map<std::pair<uint32_t, uint32_t>, std::vector<Pose>> pairs_;  // lower serial first: a = rel * b
++  std::map<std::pair<uint32_t, uint32_t>, Pose> pending_;              // one far from the average, waiting for another
++  bool dirty_ = false;                                                 // pairs_ changed since monado-relations.json
++  std::vector<std::string> said_;                                      // log lines for Flush
++  uint64_t saved_t_ = 0, say_t0_ = 0;                                  // GetTickCount64 ms
++  int say_n_ = 0, say_skipped_ = 0;                                    // lines this minute, and dropped
++  bool odd_said_ = false;                                              // a relationship that isn't a pose logged
++  void *target_ = nullptr;
++
++  void Load();
++  void Say(const std::string &s);  // a log line for Flush, at most 10 a minute (m_ held)
++  void Roll(uint64_t now);         // Say's next minute, once it's due: how many it dropped (m_ held)
++  std::string Json() const;  // monado-relations.json's contents, m_ held
++};
++
++} // namespace lh_relations
+diff --git a/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp b/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
+--- a/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
++++ b/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
+@@ -85,6 +85,7 @@
+ DEBUG_GET_ONCE_NUM_OPTION(lh_discover_wait_ms, "LH_DISCOVER_WAIT_MS", 3000)
+ DEBUG_GET_ONCE_BOOL_OPTION(lh_diagnostic_references, "LH_DIAGNOSTIC_REFERENCES", false)
+ DEBUG_GET_ONCE_BOOL_OPTION(lh_expose_base_stations, "LH_EXPOSE_BASE_STATIONS", true)
++DEBUG_GET_ONCE_BOOL_OPTION(lh_average_relationships, "LH_AVERAGE_RELATIONSHIPS", true)
+ DEBUG_GET_ONCE_FLOAT_OPTION(lh_stick_deadzone, "LH_STICK_DEADZONE", 0)
+ 
+ static constexpr size_t MAX_CONTROLLERS = 16;
+@@ -157,6 +158,14 @@
+ 	std::strncpy(c->name, "SteamVR Lighthouse Tracking", XRT_TRACKING_NAME_LEN);
+ 	c->type = XRT_TRACKING_TYPE_LIGHTHOUSE;
+ 	c->initial_offset = XRT_POSE_IDENTITY;
++	if (debug_get_bool_option_lh_average_relationships()) {
++		// Valve's library is already loaded. Install before Init starts callback threads.
++		c->relations = std::make_unique<lh_relations::RelationshipAverager>(
++		    steam_install + "/config/lighthouse", [](const std::string &message) { U_LOG_I("%s", message.c_str()); });
++		c->relations->Hook();
++	} else {
++		U_LOG_I("Lighthouse relationship averaging disabled");
++	}
+ 	for (vr::IServerTrackedDeviceProvider *const &driver : c->providers) {
+ 		vr::EVRInitError err = driver->Init(c.get());
+ 		if (err != vr::VRInitError_None) {
+@@ -174,6 +183,8 @@
+ 			ctx->process_tracker_standby();
+ 			for (vr::IServerTrackedDeviceProvider *const &provider : ctx->providers)
+ 				provider->RunFrame();
++			if (ctx->relations)
++				ctx->relations->Flush();
+ 			ctx->frame_thread_event.try_acquire_until(next);
+ 		}
+ 	});
+@@ -199,6 +210,10 @@
+ 	for (vr::IServerTrackedDeviceProvider *const &provider : providers)
+ 		provider->Cleanup();
+ 	// Cleanup has joined the driver's callback threads.
++	if (relations) {
++		relations->Unhook();
++		relations->Flush(true);
++	}
+ 	for (auto &reference : references)
+ 		reference.reset();
+ }
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -170,6 +170,22 @@
+ 	set_tests_properties(steamvr_lh_references_on steamvr_lh_references_off steamvr_lh_references_stabilized steamvr_lh_base_station_trackers PROPERTIES TIMEOUT 15 ENVIRONMENT "HOME=/nonexistent-lh-test")
+ endif()
+ 
++if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
++	add_library(test_lighthouse_relationship_driver SHARED tests_steamvr_lh_relationship_driver.cpp)
++	set_target_properties(test_lighthouse_relationship_driver PROPERTIES PREFIX "" OUTPUT_NAME "driver_lighthouse")
++	target_compile_options(test_lighthouse_relationship_driver PRIVATE -O0 -fno-omit-frame-pointer)
++	add_executable(tests_steamvr_lh_relationships tests_steamvr_lh_relationships.cpp)
++	target_include_directories(tests_steamvr_lh_relationships PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/drivers/steamvr_lh)
++	target_link_libraries(tests_steamvr_lh_relationships PRIVATE drv_steamvr_lh aux_util aux_vive xrt-external-openvr ${CMAKE_DL_LIBS})
++	add_dependencies(tests_steamvr_lh_relationships test_lighthouse_relationship_driver)
++	add_test(NAME steamvr_lh_relationships_on COMMAND tests_steamvr_lh_relationships $<TARGET_FILE:test_lighthouse_relationship_driver> on)
++	add_test(NAME steamvr_lh_relationships_off COMMAND tests_steamvr_lh_relationships $<TARGET_FILE:test_lighthouse_relationship_driver> off)
++	add_test(NAME steamvr_lh_relationships_default COMMAND ${CMAKE_COMMAND} -E env --unset=LH_AVERAGE_RELATIONSHIPS $<TARGET_FILE:tests_steamvr_lh_relationships> $<TARGET_FILE:test_lighthouse_relationship_driver> on)
++	set_tests_properties(steamvr_lh_relationships_on PROPERTIES TIMEOUT 15 ENVIRONMENT "LH_AVERAGE_RELATIONSHIPS=1")
++	set_tests_properties(steamvr_lh_relationships_off PROPERTIES TIMEOUT 15 ENVIRONMENT "LH_AVERAGE_RELATIONSHIPS=0")
++	set_tests_properties(steamvr_lh_relationships_default PROPERTIES TIMEOUT 15)
++endif()
++
+ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
+ 	add_executable(tests_steamvr_lh_stabilization tests_steamvr_lh_stabilization.cpp)
+ 	target_include_directories(tests_steamvr_lh_stabilization PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/drivers/steamvr_lh ${PROJECT_SOURCE_DIR}/src/xrt/drivers)
+diff --git a/tests/tests_steamvr_lh_relationship_driver.cpp b/tests/tests_steamvr_lh_relationship_driver.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/tests_steamvr_lh_relationship_driver.cpp
+@@ -0,0 +1,12 @@
++// Copyright 2026, OpenAI
++// SPDX-License-Identifier: BSL-1.0
++// Small ELF fixture with the Linux Lighthouse relationship ABI and log marker.
++#include <cstdint>
++struct Rel7 { float f[7]; };
++static const char moving[] = "Moving base %08X %.0fmm and %.1f deg because of relationship with %08X";
++extern "C" __attribute__((noinline)) void relationship(void *state, uint32_t, uint32_t, Rel7 rel, float) {
++  asm volatile("" : : "r"(moving) : "memory");
++  float *out = static_cast<float *>(state);
++  out[0] = rel.f[0]; // fixed [rbp+0x10] read, as used by the real driver's ABI
++  for (int i = 1; i < 7; ++i) out[i] = rel.f[i];
++}
+diff --git a/tests/tests_steamvr_lh_relationships.cpp b/tests/tests_steamvr_lh_relationships.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/tests_steamvr_lh_relationships.cpp
+@@ -0,0 +1,69 @@
++// Copyright 2026, OpenAI
++// SPDX-License-Identifier: BSL-1.0
++#include "interfaces/context.hpp"
++#include <cmath>
++#include <cstdlib>
++#include <dlfcn.h>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <stdexcept>
++#include <unistd.h>
++
++struct Rel7 { float f[7]; };
++static void check(bool ok) { if (!ok) throw std::runtime_error("relationship averaging assertion failed"); }
++int main(int argc, char **argv)
++{
++	check(argc == 3);
++	void *driver = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
++	if (!driver) throw std::runtime_error(dlerror());
++	const bool enabled = std::string(argv[2]) != "off";
++	char path[] = "/tmp/monado-relationships-XXXXXX";
++	check(mkdtemp(path));
++	const auto state = std::filesystem::path(path) / "config/lighthouse/monado-relations.json";
++	auto context = Context::create(path, path, {});
++	check(bool(context));
++	check(bool(context->relations) == enabled);
++	if (std::string(argv[2]) == "probe") {
++		check(context->relations->hooked());
++		context.reset();
++		dlclose(driver);
++		std::filesystem::remove_all(path);
++		return 0;
++	}
++	auto relationship = reinterpret_cast<void (*)(void *, uint32_t, uint32_t, Rel7, float)>(dlsym(driver, "relationship"));
++	check(relationship);
++	auto submit = [&](float x, bool inverse = false, bool antipodal = false) {
++		float out[7]{};
++		Rel7 rel{{0, 0, 0, antipodal ? -1.f : 1.f, inverse ? -x : x, 0, 0}};
++		relationship(out, inverse ? 2 : 1, inverse ? 1 : 2, rel, 0);
++		return inverse ? -out[4] : out[4];
++	};
++	check(std::abs(submit(2) - 2) < 1e-5f);
++	if (!enabled) {
++		check(std::abs(submit(2.02f) - 2.02f) < 1e-5f);
++		context.reset();
++		check(!std::filesystem::exists(state));
++	} else {
++		check(context->relations->hooked());
++		check(std::abs(submit(2.02f, true, true) - 2.01f) < 1e-4f);
++		check(std::abs(submit(5) - 2.01f) < 1e-4f);
++		check(std::abs(submit(5.01f) - 5.005f) < 1e-4f);
++		context.reset();
++		check(std::filesystem::exists(state));
++		context = Context::create(path, path, {});
++		check(context && context->relations && context->relations->hooked());
++		check(std::abs(submit(5.02f) - 5.01f) < 1e-4f);
++		context.reset();
++		check(std::abs(submit(7) - 7) < 1e-5f);
++		// Corrupt persisted poses must never feed NaNs/zero quaternions into the driver.
++		std::ofstream(state) << R"({"pairs":{"LHB-00000001 LHB-00000002":[[0,0,0,0,2,0,0]]}})";
++		context = Context::create(path, path, {});
++		check(context && context->relations && context->relations->hooked());
++		check(std::abs(submit(3) - 3) < 1e-5f);
++		context.reset();
++	}
++	dlclose(driver);
++	std::filesystem::remove_all(path);
++	std::cout << "Native Lighthouse relationship averaging " << (enabled ? "enabled" : "disabled") << " passed\n";
++}

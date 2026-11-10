@@ -21,6 +21,9 @@
 #include "lighthouse_recording_defaults.h"
 #include "lighthouse_reference_settings.h"
 #include <QUrl>
+#include "port_forwarding_config.h"
+#include <QJsonArray>
+#include <QJsonDocument>
 
 #include "escape_string.h"
 #include "gui_config.h"
@@ -120,6 +123,7 @@ void Settings::emitAllChanged()
 	encoderChanged();
 	codecChanged();
 	tenbitChanged();
+	portForwardingChanged();
 	tcpOnlyChanged();
 	applicationChanged();
 	openvrChanged();
@@ -132,6 +136,7 @@ void Settings::emitAllChanged()
 	lighthouseRecordingOutputChanged();
 	lighthouseReferenceSerialChanged();
 	lighthouseReferenceCandidatesChanged();
+	lhAverageRelationshipsChanged();
 	lhMaxExtrapolationEnabledChanged();
 	lhMaxExtrapolationChanged();
 	lhStickDeadzoneChanged();
@@ -524,6 +529,19 @@ QString Settings::lighthouseReferenceSerial() const
 	return {};
 }
 
+bool Settings::lhAverageRelationships() const
+{
+	auto it = m_jsonSettings.find("lh-average-relationships");
+	return it == m_jsonSettings.end() || !it->is_boolean() || it->get<bool>();
+}
+
+void Settings::set_lhAverageRelationships(const bool & value)
+{
+	auto old = lhAverageRelationships();
+	m_jsonSettings["lh-average-relationships"] = value;
+	if (old != value) lhAverageRelationshipsChanged();
+}
+
 QStringList Settings::lighthouseReferenceCandidates() const
 {
 	QStringList result;
@@ -634,6 +652,38 @@ void Settings::set_lhStickDeadzone(const float & value)
 	m_jsonSettings["lh-stick-deadzone"] = value;
 	if (old != value)
 		lhStickDeadzoneChanged();
+}
+
+QVariantList Settings::portForwarding() const
+{
+	try
+	{
+		auto value = m_jsonSettings.value("port-forwarding", nlohmann::json::array()).dump();
+		return QJsonDocument::fromJson(QByteArray::fromStdString(value)).array().toVariantList();
+	}
+	catch (...)
+	{
+		return {};
+	}
+}
+
+void Settings::set_portForwarding(const QVariantList & value)
+{
+	m_jsonSettings["port-forwarding"] = nlohmann::json::parse(QJsonDocument(QJsonArray::fromVariantList(value)).toJson().toStdString());
+	portForwardingChanged();
+}
+
+QString Settings::portForwardingError() const
+{
+	try
+	{
+		wivrn::parse_forwarding_rules(m_jsonSettings.value("port-forwarding", nlohmann::json::array()));
+	}
+	catch (const std::exception & e)
+	{
+		return QString::fromUtf8(e.what());
+	}
+	return {};
 }
 
 bool Settings::tcpOnly() const
@@ -777,8 +827,11 @@ void Settings::restore_defaults()
 	m_jsonSettings.erase("use-survive");
 	m_jsonSettings.erase("use-openhouse");
 	m_jsonSettings.erase("lighthouse-recording");
+	m_jsonSettings.erase("lh-average-relationships");
 	m_jsonSettings.erase("lh-stick-deadzone");
 	m_jsonSettings.erase("lh-max-extrapolation");
+	m_jsonSettings.erase("port-forwarding");
+	m_jsonSettings.erase("port-forwarding-port");
 	m_jsonSettings.erase("tcp-only");
 	m_jsonSettings.erase("application");
 	m_jsonSettings.erase("port");

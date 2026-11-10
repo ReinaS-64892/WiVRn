@@ -72,6 +72,7 @@ wivrn::wivrn_connection::wivrn_connection(std::stop_token stop_token, encryption
 void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<void()> tick)
 {
 	active = false;
+	forwarding.reset();
 
 	sockaddr_in6 server_address;
 	socklen_t len = sizeof(server_address);
@@ -252,7 +253,23 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 	if (not std::holds_alternative<from_headset::crypto_handshake>(receive().first))
 		throw std::runtime_error("No handshake received from client");
 
-	control.send(to_headset::handshake{.stream_port = port});
+	forwarding_setup forwarding_info;
+	const auto config = configuration();
+	if (!config.port_forwarding.empty())
+	{
+		try
+		{
+			forwarding_info.port = config.port_forwarding_port;
+			forwarding_info.rules = config.port_forwarding;
+			forwarding = port_forwarder::listen(forwarding_info);
+		}
+		catch (const std::exception & e)
+		{
+			fprintf(stderr, "Port forwarding disabled: %s\n", e.what());
+			forwarding_info = {};
+		}
+	}
+	control.send(to_headset::handshake{.stream_port = port, .forwarding = forwarding_info});
 
 	auto [stream_handshake, client_port] = receive(10s, true);
 
@@ -298,8 +315,23 @@ void wivrn::wivrn_connection::reset(std::stop_token stop, TCP && tcp, std::funct
 	init(stop, tick);
 }
 
+void wivrn::wivrn_connection::start_forwarding()
+{
+	try
+	{
+		if (forwarding)
+			forwarding->start();
+	}
+	catch (const std::exception & e)
+	{
+		fprintf(stderr, "Port forwarding disabled: %s\n", e.what());
+		forwarding.reset();
+	}
+}
+
 void wivrn::wivrn_connection::shutdown()
 {
+	forwarding.reset();
 	if (stream)
 		::shutdown(stream.get_fd(), SHUT_RDWR);
 	if (control)

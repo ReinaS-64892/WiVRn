@@ -218,6 +218,8 @@ The Monado host is copied from steamvr_lh *after* applying the complete Monado
 patch series. It has independent symbols and lifecycle, retaining prediction,
 controller roles, hotplug, hands, base station stabilization and tracker standby.
 The SteamVR installation and its original Lighthouse driver are not modified.
+Valve-internal relationship averaging is retained only for steamvr_lh; the
+openhouse host excludes that patch while retaining public metadata exports.
 
 openhouse keeps its room and device settings under `~/.config/lh/`. Align its
 tracking space with the headset using an external calibration tool. Its native
@@ -291,3 +293,90 @@ Change the TCP/UDP port used for the connection.
 Default value: unset
 
 If set, overrides the name displayed in the server list.
+
+## `port-forwarding`
+
+Default: `[]` (disabled).
+
+Forwards application TCP streams or UDP datagrams between the connected headset
+and PC. Configure rules in the Dashboard's **Settings → Port forwarding** section,
+then reconnect the headset. Both the client and server must be built with this
+feature: the handshake extension changes WiVRn's protocol hash.
+
+Each rule has:
+
+- `protocol`: `"tcp"` or `"udp"`.
+- `source`: `"headset"` or `"pc"`, the side which listens for local applications.
+- `listen-port`: local application port on the source side (1–65535).
+- `destination-port`: application port on the other side (1–65535).
+- `bidirectional`: whether application data can also return through the same
+  connection or UDP sender mapping. Default: `false`. This does not create a
+  listening port on the destination side. For ordinary TCP protocols, use `true`.
+
+For example, HMD applications sending OSC to `127.0.0.1:9000` can reach VRChat on
+PC, and a PC application can connect to an HMD service through PC localhost:
+
+```json
+"port-forwarding": [
+  {
+    "protocol": "udp",
+    "source": "headset",
+    "listen-port": 9000,
+    "destination-port": 9000,
+    "bidirectional": false
+  },
+  {
+    "protocol": "tcp",
+    "source": "pc",
+    "listen-port": 47280,
+    "destination-port": 47280,
+    "bidirectional": true
+  }
+]
+```
+
+VRChat's outgoing OSC normally targets UDP port 9001. To receive that on the
+headset, add a separate PC → headset UDP rule from 9001 to 9001; enabling replies
+on the 9000 rule does not redirect traffic addressed to a different port.
+
+All application listeners and destinations are IPv4 `127.0.0.1`. No root or TUN
+interface is required. Broadcast/multicast discovery, OSCQuery discovery and
+arbitrary LAN destinations are not forwarded. Configure external applications
+with localhost explicitly. Forwarding supplies connectivity; it does not port
+third-party drivers to Monado or provide access to headset cameras.
+
+Forwarding uses dedicated TCP/UDP sockets and its own worker thread, never the
+VR data sockets. Auxiliary records use AES-256-GCM with separate session keys
+sent through WiVRn's existing control connection. Keep WiVRn encryption enabled
+for protection of those keys. An auxiliary failure disables forwarding until
+WiVRn reconnects, without stopping VR streaming. The server worker starts after
+the runtime process forks.
+
+There is currently no bandwidth limiter: physical bandwidth is shared with VR.
+Buffers and active flows have finite memory/resource bounds (4 MiB per output
+buffer, 256 flows per endpoint, 64 rules). UDP sender mappings expire after 60
+seconds without traffic. UDP payloads up to 65,472 bytes are supported; larger
+ones are dropped. Large datagrams may require IP fragmentation on the network.
+An occupied application port disables forwarding on that endpoint and is
+reported in the client/server log.
+
+## `port-forwarding-port`
+
+Default: `9758`.
+
+Like WiVRn's main `port` setting, this is a fixed PC listening port. Set
+`"port-forwarding-port": 9758` in the server configuration to override it
+(valid range: 1–65535). No automatic port selection is used for sessions; if
+this port is occupied, forwarding is disabled and the error is logged. The
+headset learns the configured port through the WiVRn handshake.
+
+Dedicated PC port used by the auxiliary TCP and UDP connections. Like the main
+`port` setting, configure it in the server configuration file; no Dashboard port
+control is provided. Allow both protocols through the PC firewall when forwarding
+is configured; the standard WiVRn firewall rule for 9757 does not cover this port.
+No auxiliary sockets are opened when the rule list is empty.
+
+For an ADB TCP-only WiVRn connection, also reverse this TCP port (for example,
+`adb reverse tcp:9758 tcp:9758`). TCP application forwarding can then work over
+that separate connection. UDP forwarding requires IP connectivity; it does not
+fall back to the VR TCP connection or to ADB TCP forwarding.
