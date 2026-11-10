@@ -133,7 +133,7 @@ public:
 		return result;
 	}
 
-	sample get_at(XrTime timestamp) const
+	sample get_at(XrTime timestamp, XrDuration prediction_limit_ns = -1) const
 	{
 		Eigen::Matrix<float, 2 * stored_samples, polynomial_order + 1> A;
 		Eigen::Matrix<float, 2 * stored_samples, N> b;
@@ -143,6 +143,10 @@ public:
 		// and production_ts + 1.1 * max_extrapolation_ns
 		// This allows a small buffer so that polynomial extrapolation fills the gap of networking hiccups
 		timestamp = std::min(timestamp, production_timestamp + (wivrn::max_extrapolation_ns * 11) / 10);
+
+		// Client samples may already be predicted: cap against their production time.
+		if (prediction_limit_ns >= 0)
+			timestamp = std::min(timestamp, production_timestamp + prediction_limit_ns);
 
 		const sample * closest = data.data();
 
@@ -195,6 +199,9 @@ public:
 		// Not enough data to extrapolate
 		if (row < 2)
 		{
+			// A lone predicted pose without velocity cannot be resolved at the limit.
+			if (prediction_limit_ns >= 0 && closest->timestamp > timestamp)
+				return {};
 			if (closest->y and std::abs(closest->production_timestamp - timestamp) < 1'000'000'000)
 				return *closest;
 			return {};

@@ -93,6 +93,7 @@ public:
 	Q_PROPERTY(bool lhAverageRelationships READ lhAverageRelationships WRITE set_lhAverageRelationships NOTIFY lhAverageRelationshipsChanged)
 	Q_PROPERTY(bool lhMaxExtrapolationEnabled READ lhMaxExtrapolationEnabled NOTIFY lhMaxExtrapolationEnabledChanged)
 	Q_PROPERTY(int64_t lhMaxExtrapolation READ lhMaxExtrapolation WRITE set_lhMaxExtrapolation NOTIFY lhMaxExtrapolationChanged)
+	Q_PROPERTY(int64_t controllerMaxExtrapolation READ controllerMaxExtrapolation WRITE set_controllerMaxExtrapolation NOTIFY controllerMaxExtrapolationChanged)
 	Q_PROPERTY(float lhStickDeadzone READ lhStickDeadzone WRITE set_lhStickDeadzone NOTIFY lhStickDeadzoneChanged)
 
 	Q_PROPERTY(bool flatpak READ flatpak CONSTANT)
@@ -121,6 +122,7 @@ public:
 	Q_SIGNAL void lighthouseReferenceCandidatesChanged();
 	SETTER_GETTER_NOTIFY(bool, lhMaxExtrapolationEnabled)
 	SETTER_GETTER_NOTIFY(int64_t, lhMaxExtrapolation)
+	SETTER_GETTER_NOTIFY(int64_t, controllerMaxExtrapolation)
 	SETTER_GETTER_NOTIFY(float, lhStickDeadzone)
 	SETTER_GETTER_NOTIFY(QVariantList, portForwarding)
 	SETTER_GETTER_NOTIFY(bool, tcpOnly)

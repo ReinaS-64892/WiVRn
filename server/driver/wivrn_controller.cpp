@@ -741,7 +741,8 @@ wivrn_controller::wivrn_controller(xrt_device_name name,
         joints_unobstructed(hand_id == 0 ? from_headset::hand_tracking::hand_id::left : from_headset::hand_tracking::hand_id::right),
         joints_conforming(hand_id == 0 ? from_headset::hand_tracking::hand_id::left_controller : from_headset::hand_tracking::hand_id::right_controller),
         inputs_array(input_count, xrt_input{}),
-        cnx(cnx)
+        cnx(cnx),
+        prediction_limit_ns(configuration().controller_max_extrapolation * 1'000'000)
 {
 	inputs = inputs_array.data();
 
@@ -945,26 +946,26 @@ xrt_result_t wivrn_controller::get_tracked_pose(xrt_input_name name, int64_t at_
 	{
 		case XRT_INPUT_TOUCH_AIM_POSE:
 		case XRT_INPUT_HAND_AIM_POSE:
-			std::tie(production_timestamp, *res, device) = aim.get_pose_at(target_ns);
+			std::tie(production_timestamp, *res, device) = aim.get_pose_at(target_ns, prediction_limit_ns);
 			break;
 		case XRT_INPUT_TOUCH_GRIP_POSE:
 		case XRT_INPUT_HAND_GRIP_POSE:
-			std::tie(production_timestamp, *res, device) = grip.get_pose_at(target_ns);
+			std::tie(production_timestamp, *res, device) = grip.get_pose_at(target_ns, prediction_limit_ns);
 			break;
 		case XRT_INPUT_GENERIC_PALM_POSE:
-			std::tie(production_timestamp, *res, device) = palm.get_pose_at(target_ns);
+			std::tie(production_timestamp, *res, device) = palm.get_pose_at(target_ns, prediction_limit_ns);
 			break;
 		case XRT_INPUT_HAND_PINCH_POSE:
-			std::tie(production_timestamp, *res, device) = pinch_ext.get_pose_at(target_ns);
+			std::tie(production_timestamp, *res, device) = pinch_ext.get_pose_at(target_ns, prediction_limit_ns);
 			break;
 		case XRT_INPUT_HAND_POKE_POSE:
-			std::tie(production_timestamp, *res, device) = poke_ext.get_pose_at(target_ns);
+			std::tie(production_timestamp, *res, device) = poke_ext.get_pose_at(target_ns, prediction_limit_ns);
 			break;
 		default:
 			U_LOG_XDEV_UNSUPPORTED_INPUT(this, u_log_get_global_level(), name);
 			return XRT_ERROR_INPUT_UNSUPPORTED;
 	}
-	cnx->add_tracking_request(device, at_timestamp_ns, production_timestamp, now);
+	cnx->add_tracking_request(device, prediction_limit_ns >= 0 ? std::min(target_ns, now + prediction_limit_ns) : at_timestamp_ns, production_timestamp, now);
 	return XRT_SUCCESS;
 }
 

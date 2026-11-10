@@ -49,6 +49,7 @@ class wivrn_controller : public xrt_device
 	std::vector<xrt_output> outputs_array;
 
 	wivrn::wivrn_session * cnx;
+	const XrDuration prediction_limit_ns;
 
 public:
 	using base_t = xrt_device;

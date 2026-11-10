@@ -22,6 +22,7 @@
 #include "configuration.h"
 #include "lighthouse_reference_settings.h"
 #include "port_forwarding_config.h"
+#include "pose_prediction.h"
 
 #include <algorithm>
 #include <chrono>
@@ -233,6 +234,8 @@ configuration::configuration()
 			if (auto output = it->find("output-directory"); output != it->end() && output->is_string())
 				lighthouse_recording_output = output->get<std::string>();
 		}
+
+		controller_max_extrapolation = pose_prediction_limit(json, "controller-max-extrapolation");
 
 		if (auto it = json.find("lh-max-extrapolation"); it != json.end())
 			lh_max_extrapolation = *it;

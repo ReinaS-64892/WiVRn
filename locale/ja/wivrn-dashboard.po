@@ -1072,3 +1072,21 @@ msgstr[0] "%1ms"
 #: dashboard/qml/SettingsPage.qml
 msgid "Maximum time in milliseconds that poses may be extrapolated ahead for Lighthouse tracked devices. Tune this value if you experience jittery or wobbly tracking."
 msgstr "Lighthouse トラッキングデバイスの姿勢を先読みする最大時間（ミリ秒）です。トラッキングに細かな揺れやふらつきがある場合に調整してください。"
+
+#: dashboard/qml/SettingsPage.qml
+msgid "Clamp controller pose prediction"
+msgstr "コントローラーの予測姿勢に上限を設定"
+
+#: dashboard/qml/SettingsPage.qml
+msgid "Controller max pose prediction"
+msgstr "コントローラーの最大予測時間"
+
+#: dashboard/qml/SettingsPage.qml
+#, kde-format
+msgctxt "pose prediction limit in milliseconds"
+msgid "%1 ms"
+msgstr "%1 ms"
+
+#: dashboard/qml/SettingsPage.qml
+msgid "Limit pose prediction for controllers streamed from the headset. 0 ms disables forward prediction. Lighthouse devices use their separate limit. Reconnect the headset to apply changes."
+msgstr "ヘッドセットから転送されるコントローラー姿勢の予測時間を制限します。0 ms で先行予測を無効にします。Lighthouse デバイスには専用の上限設定が適用されます。変更を反映するにはヘッドセットを再接続してください。"

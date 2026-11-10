@@ -128,6 +128,29 @@ Kirigami.ScrollablePage {
                 text: i18n("Enable debug window")
                 visible: Settings.debug_gui_supported
             }
+            Controls.CheckBox {
+                id: controller_max_extrapolation_enabled
+                text: i18n("Clamp controller pose prediction")
+            }
+            RowLayout {
+                visible: controller_max_extrapolation_enabled.checked
+                Kirigami.FormData.label: i18n("Controller max pose prediction")
+                Controls.Slider {
+                    id: controller_max_extrapolation
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 100
+                    stepSize: 1
+                }
+                Controls.Label {
+                    text: i18nc("pose prediction limit in milliseconds", "%1 ms", controller_max_extrapolation.value)
+                    Layout.preferredWidth: 45
+                    Layout.alignment: Qt.AlignRight
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Limit pose prediction for controllers streamed from the headset. 0 ms disables forward prediction. Lighthouse devices use their separate limit. Reconnect the headset to apply changes.")
+                }
+            }
             Controls.ComboBox {
                 id: lighthouse_backend
                 visible: Settings.steamvr_lh_supported || Settings.survive_supported || Settings.openhouse_supported
@@ -430,6 +453,7 @@ Kirigami.ScrollablePage {
         } else {
             Settings.lhMaxExtrapolation = -1;
         }
+        Settings.controllerMaxExtrapolation = controller_max_extrapolation_enabled.checked ? controller_max_extrapolation.value : -1;
         Settings.lhStickDeadzone = lh_stick_deadzone.value;
         Settings.hidForwarding = hid_forwarding.checked;
 
@@ -449,6 +473,8 @@ Kirigami.ScrollablePage {
         lighthouse_recording_output.text = Settings.lighthouseRecordingOutput;
         lh_max_extrapolation_enabled.checked = Settings.lhMaxExtrapolationEnabled;
         lh_max_extrapolation.value = Settings.lhMaxExtrapolationEnabled ? Settings.lhMaxExtrapolation : 50;
+        controller_max_extrapolation_enabled.checked = Settings.controllerMaxExtrapolation >= 0;
+        controller_max_extrapolation.value = Settings.controllerMaxExtrapolation >= 0 ? Settings.controllerMaxExtrapolation : 50;
         lh_stick_deadzone.value = Settings.lhStickDeadzone;
         hid_forwarding.checked = Settings.hidForwarding;
 

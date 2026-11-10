@@ -139,16 +139,16 @@ void pose_list::set_derived(pose_list * source, xrt_pose offset, bool force)
 	}
 }
 
-std::tuple<XrTime, xrt_space_relation, device_id> pose_list::get_pose_at(XrTime at_timestamp_ns)
+std::tuple<XrTime, xrt_space_relation, device_id> pose_list::get_pose_at(XrTime at_timestamp_ns, XrDuration prediction_limit_ns)
 {
 	if (auto source = this->source.load())
 	{
-		auto res = source->get_pose_at(at_timestamp_ns);
+		auto res = source->get_pose_at(at_timestamp_ns, prediction_limit_ns);
 		math_pose_transform(&std::get<1>(res).pose, &offset, &std::get<1>(res).pose);
 		return res;
 	}
 
-	return std::tuple_cat(get_at(at_timestamp_ns), std::make_tuple(device));
+	return std::tuple_cat(get_at(at_timestamp_ns, prediction_limit_ns), std::make_tuple(device));
 }
 
 void pose_list::reset()
@@ -224,7 +224,7 @@ void pose_list::add_sample(XrTime production_timestamp, XrTime timestamp, const 
 	}
 }
 
-std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
+std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns, XrDuration prediction_limit_ns)
 {
 	std::lock_guard lock(mutex);
 
@@ -233,8 +233,8 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 		ret.relation_flags = xrt_space_relation_flags(int(ret.relation_flags) | f);
 	};
 
-	auto position = positions.get_at(at_timestamp_ns);
-	auto orientation = orientations.get_at(at_timestamp_ns);
+	auto position = positions.get_at(at_timestamp_ns, prediction_limit_ns);
+	auto orientation = orientations.get_at(at_timestamp_ns, prediction_limit_ns);
 
 	if (position.y)
 	{
