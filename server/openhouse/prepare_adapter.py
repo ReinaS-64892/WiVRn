@@ -31,6 +31,22 @@ def rename_symbols(text):
     return text.replace('steamvr_lh', 'openhouse').replace('lighthouse_reference', 'openhouse_reference').replace('reference_recorder.hpp', 'openhouse_reference_recorder.hpp')
 
 
+def prepare_provider(source, destination):
+    # A learned base is accurate enough for alignment before RoomMap::Locked
+    # freezes further refinement (100 keyframes). Match the runtime's public
+    # readiness flag instead of hiding learned, still-refining bases from xdev.
+    text = replace_once(source.read_text(),
+        "    // Until it's locked (or is the origin) it shows as searching (a blinking icon): its\n"
+        "    // place can still move. Learned but not locked yet: calibrating.\n"
+        "    const bool settled = b.known && (b.origin || b.locked);",
+        "    // Use the runtime's accuracy/evidence threshold for tracking and alignment.\n"
+        "    // Locking only controls whether the room solver keeps refining this base.\n"
+        "    const bool settled = b.known && b.learned;")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not destination.exists() or destination.read_text() != text:
+        destination.write_text(text)
+
+
 def prepare(source, destination, excluded_patches=()):
     if excluded_patches:
         # Work on a private copy: never revert patches in the shared Monado tree.
@@ -87,7 +103,9 @@ def prepare(source, destination, excluded_patches=()):
 
 
 if __name__ == '__main__':
-    if sys.argv[1] == '--test':
+    if sys.argv[1] == '--provider':
+        prepare_provider(Path(sys.argv[2]), Path(sys.argv[3]))
+    elif sys.argv[1] == '--test':
         Path(sys.argv[3]).write_text(rename_symbols(Path(sys.argv[2]).read_text()))
     else:
         prepare(Path(sys.argv[1]), Path(sys.argv[2]), [Path(p) for p in sys.argv[3:]])

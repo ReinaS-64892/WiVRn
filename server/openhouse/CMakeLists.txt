@@ -23,6 +23,14 @@ endif()
 get_target_property(provider_sources driver_lighthouse SOURCES)
 get_target_property(provider_includes driver_lighthouse INCLUDE_DIRECTORIES)
 get_target_property(provider_libraries driver_lighthouse LINK_LIBRARIES)
+# Patch a private copy so local FetchContent overrides receive the same fix
+# without modifying the pinned provider checkout.
+set(provider_entry "${CMAKE_CURRENT_BINARY_DIR}/provider/driver_lighthouse.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${openhouse_SOURCE_DIR}/src/openvr/driver_lighthouse.cpp")
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/prepare_adapter.py"
+    --provider "${openhouse_SOURCE_DIR}/src/openvr/driver_lighthouse.cpp" "${provider_entry}"
+    COMMAND_ERROR_IS_FATAL ANY)
 set(absolute_provider_sources)
 foreach(source IN LISTS provider_sources)
     if(source MATCHES "^\\$<" OR IS_ABSOLUTE "${source}")
@@ -31,6 +39,9 @@ foreach(source IN LISTS provider_sources)
         list(APPEND absolute_provider_sources "${openhouse_SOURCE_DIR}/${source}")
     endif()
 endforeach()
+list(REMOVE_ITEM absolute_provider_sources "${openhouse_SOURCE_DIR}/src/openvr/driver_lighthouse.cpp")
+list(APPEND absolute_provider_sources "${provider_entry}")
+list(APPEND provider_includes "${openhouse_SOURCE_DIR}/src/openvr")
 add_library(wivrn-openhouse SHARED ${absolute_provider_sources})
 target_include_directories(wivrn-openhouse PRIVATE ${provider_includes})
 target_link_libraries(wivrn-openhouse PRIVATE ${provider_libraries})
@@ -63,6 +74,17 @@ target_link_libraries(drv_openhouse PUBLIC xrt-external-openvr PRIVATE aux_util 
     wivrn-openhouse ZLIB::ZLIB)
 
 if(WIVRN_BUILD_TEST)
+    # Include the actual provider entry point in the test translation unit to
+    # exercise Device::UpdateBase with synthetic runtime states, without USB.
+    set(provider_test_sources ${absolute_provider_sources})
+    list(REMOVE_ITEM provider_test_sources "${provider_entry}")
+    add_executable(lh-openhouse-base-pose-test tests/base_pose.cpp ${provider_test_sources})
+    target_include_directories(lh-openhouse-base-pose-test PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/provider" ${provider_includes} "${openhouse_SOURCE_DIR}/tests/openvr")
+    target_link_libraries(lh-openhouse-base-pose-test PRIVATE ${provider_libraries} ${CMAKE_DL_LIBS})
+    target_compile_features(lh-openhouse-base-pose-test PRIVATE cxx_std_20)
+    set_target_properties(lh-openhouse-base-pose-test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
     execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/prepare_adapter.py"
         --test "${PROJECT_SOURCE_DIR}/tools/lh-recorder/tests/hotplug.cpp"
         "${CMAKE_CURRENT_BINARY_DIR}/openhouse_hotplug.cpp" COMMAND_ERROR_IS_FATAL ANY)
