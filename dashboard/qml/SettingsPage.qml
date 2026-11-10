@@ -132,11 +132,22 @@ Kirigami.ScrollablePage {
                     toolTipText: i18n("Allows the use of lighthouse-based controllers and trackers.\nRequires SteamVR to be installed.\nDevices must be be powered on before connecting to WiVRn.\nAn external tool such as motoc is needed for calibration.")
                 }
             }
+            RowLayout {
+                visible: Settings.steamvr_lh_supported && steamvr_lh.checked
+                Controls.CheckBox {
+                    id: lh_average_relationships
+                    text: i18n("Average base station relationships")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Reduces base station placement changes by averaging repeated measurements. Reconnect the headset to apply.")
+                }
+            }
             Controls.CheckBox {
                 id: lighthouse_stabilization_enabled
                 visible: Settings.steamvr_lh_supported && steamvr_lh.checked
                 text: i18n("Use a base station as tracking origin (experimental)")
             }
+
             Controls.ComboBox {
                 id: lighthouse_reference_serial
                 visible: Settings.steamvr_lh_supported && steamvr_lh.checked
@@ -389,6 +400,7 @@ Kirigami.ScrollablePage {
 
         Settings.debugGui = debug_gui.checked;
         Settings.steamVrLh = steamvr_lh.checked;
+        Settings.lhAverageRelationships = lh_average_relationships.checked;
         Settings.lighthouseReferenceSerial = lighthouse_stabilization_enabled.checked ? lighthouse_reference_serial.editText.trim() : "";
         Settings.lighthouseRecordingEnabled = lighthouse_recording_enabled.checked;
         Settings.lighthouseRecordingOutput = lighthouse_recording_output.text;
@@ -408,6 +420,7 @@ Kirigami.ScrollablePage {
         select_game.load();
         debug_gui.checked = Settings.debugGui;
         steamvr_lh.checked = Settings.steamVrLh;
+        lh_average_relationships.checked = Settings.lhAverageRelationships;
         lighthouse_stabilization_enabled.checked = Settings.lighthouseReferenceSerial.length > 0;
         lighthouse_reference_serial.currentIndex = Settings.lighthouseReferenceCandidates.indexOf(Settings.lighthouseReferenceSerial);
         lighthouse_reference_serial.editText = Settings.lighthouseReferenceSerial;

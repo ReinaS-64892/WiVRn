@@ -132,6 +132,7 @@ void Settings::emitAllChanged()
 	lighthouseRecordingOutputChanged();
 	lighthouseReferenceSerialChanged();
 	lighthouseReferenceCandidatesChanged();
+	lhAverageRelationshipsChanged();
 	lhMaxExtrapolationEnabledChanged();
 	lhMaxExtrapolationChanged();
 	lhStickDeadzoneChanged();
@@ -442,6 +443,19 @@ QString Settings::lighthouseReferenceSerial() const
 	return {};
 }
 
+bool Settings::lhAverageRelationships() const
+{
+	auto it = m_jsonSettings.find("lh-average-relationships");
+	return it == m_jsonSettings.end() || !it->is_boolean() || it->get<bool>();
+}
+
+void Settings::set_lhAverageRelationships(const bool & value)
+{
+	auto old = lhAverageRelationships();
+	m_jsonSettings["lh-average-relationships"] = value;
+	if (old != value) lhAverageRelationshipsChanged();
+}
+
 QStringList Settings::lighthouseReferenceCandidates() const
 {
 	QStringList result;
@@ -727,6 +741,7 @@ void Settings::restore_defaults()
 	m_jsonSettings.erase("debug-gui");
 	m_jsonSettings.erase("use-steamvr-lh");
 	m_jsonSettings.erase("lighthouse-recording");
+	m_jsonSettings.erase("lh-average-relationships");
 	m_jsonSettings.erase("lh-stick-deadzone");
 	m_jsonSettings.erase("port-forwarding");
 	m_jsonSettings.erase("port-forwarding-port");

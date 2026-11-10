@@ -23,6 +23,15 @@ int main(int argc, char ** argv)
 	qputenv("XDG_DATA_HOME", "/tmp/lh-xdg-data");
 	Settings a;
 	a.loadJson("{}");
+	require(a.lhAverageRelationships());
+	a.set_lhAverageRelationships(false);
+	Settings average_roundtrip;
+	average_roundtrip.loadJson(a.saveJson());
+	require(!average_roundtrip.lhAverageRelationships());
+	average_roundtrip.restore_defaults();
+	require(average_roundtrip.lhAverageRelationships());
+	average_roundtrip.loadJson(R"({"lh-average-relationships":"invalid"})");
+	require(average_roundtrip.lhAverageRelationships());
 	require(!a.lighthouseRecordingEnabled());
 	require(a.lighthouseRecordingOutput() == "/tmp/lh-xdg-data/wivrn/lighthouse-recordings");
 	a.loadJson(R"({"unrelated":42,"lighthouse-recording":{"enabled":false}})");
