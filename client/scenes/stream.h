@@ -191,6 +191,8 @@ private:
 	};
 	settings_page current_settings_page = settings_page::video;
 	std::optional<int64_t> pending_absence_time;
+	// Shared with decoder threads so frames are retained during the rendering grace period.
+	std::atomic<XrTime> rendering_grace_deadline = 0;
 
 	// Tab currently being displayed
 	stream_tab gui_status = stream_tab::hidden;

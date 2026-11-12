@@ -614,7 +614,7 @@ scenes::stream::~stream()
 void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_ptr<shard_accumulator::blit_handle> handle)
 {
 	assert(handle);
-	if (!application::is_visible())
+	if (!application::is_visible() and instance.now() >= rendering_grace_deadline.load())
 		return;
 
 	{
@@ -830,7 +830,15 @@ bool scenes::stream::is_gui_interactable() const
 
 void scenes::stream::render(const XrFrameState & frame_state)
 {
-	if (pending_absence_time && instance.now() >= *pending_absence_time)
+	const auto now = instance.now();
+	if (frame_state.shouldRender)
+		rendering_grace_deadline = 0;
+	else if (rendering_grace_deadline == 0)
+		// Start once per interruption; repeated shouldRender=false must not extend the deadline.
+		rendering_grace_deadline = now + int64_t(application::get_config().user_presence_debounce_ms) * 1'000'000;
+
+	const bool should_render = frame_state.shouldRender or now < rendering_grace_deadline.load();
+	if (pending_absence_time && now >= *pending_absence_time)
 	{
 		network_session->send_control(from_headset::user_presence_changed{.present = false, .change_time = *pending_absence_time});
 		pending_absence_time.reset();
@@ -844,7 +852,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	last_display_time = frame_state.predictedDisplayTime;
 
 	std::shared_lock lock(decoder_mutex);
-	if (not frame_state.shouldRender or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
+	if (not should_render or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
 	{
 		// TODO: stop/restart video stream
 		session.begin_frame();
