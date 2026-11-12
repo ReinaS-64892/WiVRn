@@ -830,15 +830,15 @@ bool scenes::stream::is_gui_interactable() const
 
 void scenes::stream::render(const XrFrameState & frame_state)
 {
-	const auto now = instance.now();
+	const auto render_check_time = instance.now();
 	if (frame_state.shouldRender)
 		rendering_grace_deadline = 0;
 	else if (rendering_grace_deadline == 0)
 		// Start once per interruption; repeated shouldRender=false must not extend the deadline.
-		rendering_grace_deadline = now + int64_t(application::get_config().user_presence_debounce_ms) * 1'000'000;
+		rendering_grace_deadline = render_check_time + int64_t(application::get_config().user_presence_debounce_ms) * 1'000'000;
 
-	const bool should_render = frame_state.shouldRender or now < rendering_grace_deadline.load();
-	if (pending_absence_time && now >= *pending_absence_time)
+	const bool should_render = frame_state.shouldRender or render_check_time < rendering_grace_deadline.load();
+	if (pending_absence_time && render_check_time >= *pending_absence_time)
 	{
 		network_session->send_control(from_headset::user_presence_changed{.present = false, .change_time = *pending_absence_time});
 		pending_absence_time.reset();
