@@ -1,0 +1,79 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] usb: re-identify a receiver after wireless reconnects
+
+A dongle may reconnect to a different tracker without being unplugged. The
+reader previously reset only the decoder and reused the original serial,
+config and IMU ranges, attributing the replacement device to its predecessor.
+
+On a disconnect report or a radio data gap, retire the endpoint and let the
+existing asynchronous USB probe reopen and identify it. Do not record or
+decode post-gap packets under an unverified identity. Reuse the normal config
+cache keyed by the freshly queried device serial, not the receiver serial.
+
+--- a/src/transport/usb/usb_transport.cpp
++++ b/src/transport/usb/usb_transport.cpp
+@@ -3,6 +3,7 @@
+ #include "usb_transport.hpp"
+
+ #include <mutex>
++#include <map>
+ #include "device_config.hpp"
+ #include "haptics.hpp"
+ #include "platform/platform.hpp"
+@@ -81,7 +82,11 @@
+
+ void ReportDecoder::AddEndpoint(const EndpointInfo& e) {
+   auto& dev = devices_[e.serial];
+-  bool fresh = !dev;
++  // With no live endpoint, even the same serial starts a new clock/IMU epoch.
++  // Keep sharing state only between interfaces that are still attached.
++  bool fresh = !dev || std::none_of(eps_.begin(), eps_.end(), [&](const auto& other) {
++    return other.second.info.serial == e.serial;
++  });
+   if (fresh) {
+     dev = std::make_shared<DeviceState>();
+     dev->id = e.serial;
+@@ -675,6 +680,10 @@
+   // per pass; sleep 1 ms if a pass took < 0.5 ms.
+   struct Rep { unsigned char buf[64]; int n; double t; };
+   Rep reps[10];
++  // A USB receiver can stay plugged in while a different radio device connects.
++  // Reports carry no device serial: never decode a new connection with the old
++  // endpoint's identity, sensor geometry or IMU ranges.
++  std::map<uint16_t, double> lastWirelessReport;
+   while (!stop_) {
+     const double passStart = HostNow();
+     if (havePending_) {
+@@ -759,6 +768,24 @@
+       }
+       for (int i = 0; i < count; i++) {
+         const bool last = i == count - 1;
++        if (o.info.kind == EndpointKind::Wireless) {
++          const uint8_t report = reps[i].buf[0];
++          const bool data = report == 0x23 || report == 0x24;
++          const auto previous = lastWirelessReport.find(o.info.ep);
++          const bool gap = data && previous != lastWirelessReport.end() && reps[i].t - previous->second > 1.0;
++          if (report == 0x26 || gap) {
++            // Preserve the old device's explicit disconnect in a capture. A
++            // post-gap data packet has an unknown owner: drop it and the rest
++            // of this batch until the probe has identified the connected device.
++            if (report == 0x26)
++              capture_.WriteReport(reps[i].t, o.info.ep, true, reps[i].buf, size_t(reps[i].n));
++            Log(LogLevel::Info, "receiver %s: %s; reopening to identify the connected device\n",
++                o.receiver.c_str(), report == 0x26 ? "wireless disconnect" : "wireless data gap");
++            o.disconnected = true;
++            break;
++          }
++          if (data) lastWirelessReport[o.info.ep] = reps[i].t;
++        }
+         capture_.WriteReport(reps[i].t, o.info.ep, last, reps[i].buf, size_t(reps[i].n));
+         decoder_.OnReport(reps[i].t, o.info.ep, last, reps[i].buf, size_t(reps[i].n));
+         if (o.info.kind == EndpointKind::Wireless && decoder_.WirelessGeneration(o.info.ep) != o.generation) {
+@@ -777,6 +804,7 @@
+       if (!it->receiver.empty()) DropReceiver(it->receiver);
+       hid_close(it->dev);
+       decoder_.RemoveEndpoint(it->info.ep);
++      lastWirelessReport.erase(it->info.ep);
+       {
+         std::lock_guard lock(pathsMutex_);
+         paths_.erase(it->path);

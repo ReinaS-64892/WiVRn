@@ -18,6 +18,21 @@ if(NOT TARGET driver_lighthouse)
     message(FATAL_ERROR "openhouse did not build its OpenVR provider")
 endif()
 
+# Patch a private transport source so pinned downloads and local FetchContent
+# overrides both receive the reconnect fix without modifying their checkouts.
+file(GLOB transport_patches CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/patches/openhouse/*.patch")
+set(transport_source "${openhouse_SOURCE_DIR}/src/transport/usb/usb_transport.cpp")
+set(transport_entry "${CMAKE_CURRENT_BINARY_DIR}/provider/usb_transport.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${transport_source}" ${transport_patches} "${CMAKE_CURRENT_SOURCE_DIR}/prepare_adapter.py")
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/prepare_adapter.py"
+    --transport "${transport_source}" "${transport_entry}" ${transport_patches}
+    COMMAND_ERROR_IS_FATAL ANY)
+get_target_property(transport_sources lh_usb SOURCES)
+list(REMOVE_ITEM transport_sources src/transport/usb/usb_transport.cpp "${transport_source}")
+list(APPEND transport_sources "${transport_entry}")
+set_property(TARGET lh_usb PROPERTY SOURCES "${transport_sources}")
+
 # Reuse upstream's complete frontend, with a unique, directly linked factory.
 # A private DSO keeps embedded hidapi/OpenVR globals out of the Monado host.
 get_target_property(provider_sources driver_lighthouse SOURCES)
@@ -74,6 +89,15 @@ target_link_libraries(drv_openhouse PUBLIC xrt-external-openvr PRIVATE aux_util 
     wivrn-openhouse ZLIB::ZLIB)
 
 if(WIVRN_BUILD_TEST)
+    enable_testing()
+    # Real transport threads against a synthetic HID receiver: no hardware access.
+    add_executable(lh-openhouse-reconnect-test tests/reconnect.cpp)
+    target_link_libraries(lh-openhouse-reconnect-test PRIVATE lh_usb)
+    set_target_properties(lh-openhouse-reconnect-test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    add_test(NAME openhouse-wireless-reconnect COMMAND lh-openhouse-reconnect-test)
+    set_tests_properties(openhouse-wireless-reconnect PROPERTIES TIMEOUT 40)
+
     # Include the actual provider entry point in the test translation unit to
     # exercise Device::UpdateBase with synthetic runtime states, without USB.
     set(provider_test_sources ${absolute_provider_sources})

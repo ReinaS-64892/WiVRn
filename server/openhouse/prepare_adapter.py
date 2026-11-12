@@ -47,6 +47,24 @@ def prepare_provider(source, destination):
         destination.write_text(text)
 
 
+def prepare_transport(source, destination, patches):
+    # Apply WiVRn's transport fixes to a private translation unit, including
+    # when FetchContent uses an owner's local openhouse checkout.
+    with tempfile.TemporaryDirectory(prefix='openhouse-transport-') as temporary:
+        root = Path(temporary)
+        relative = Path('src/transport/usb/usb_transport.cpp')
+        (root / relative).parent.mkdir(parents=True)
+        shutil.copyfile(source, root / relative)
+        for patch in patches:
+            subprocess.run(['patch', '--forward', '--batch', '--fuzz=0', '-p1'],
+                           cwd=root, input=patch.read_text(), text=True, check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        text = (root / relative).read_text()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not destination.exists() or destination.read_text() != text:
+        destination.write_text(text)
+
+
 def prepare(source, destination, excluded_patches=()):
     if excluded_patches:
         # Work on a private copy: never revert patches in the shared Monado tree.
@@ -105,6 +123,8 @@ def prepare(source, destination, excluded_patches=()):
 if __name__ == '__main__':
     if sys.argv[1] == '--provider':
         prepare_provider(Path(sys.argv[2]), Path(sys.argv[3]))
+    elif sys.argv[1] == '--transport':
+        prepare_transport(Path(sys.argv[2]), Path(sys.argv[3]), [Path(p) for p in sys.argv[4:]])
     elif sys.argv[1] == '--test':
         Path(sys.argv[3]).write_text(rename_symbols(Path(sys.argv[2]).read_text()))
     else:
