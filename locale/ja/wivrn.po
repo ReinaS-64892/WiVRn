@@ -257,10 +257,10 @@ msgstr "体験中のウィンドウ表示を無効にする"
 msgctxt "confirmation message"
 msgid ""
 "Do you really want to disable the in-stream window?\n"
-"You will not be able to re-open it with the thumbsticks."
+"You will not be able to re-open it with the controller shortcut."
 msgstr ""
 "体験中のウィンドウを無効にしてもよろしいですか？\n"
-"サムスティックによる再表示ができなくなります。"
+"コントローラーのショートカットによる再表示ができなくなります。"
 
 #: client/scenes/gui_settings.cpp:443 client/scenes/lobby_gui.cpp:886
 msgid "Yes"
@@ -600,11 +600,27 @@ msgstr "体験中ウィンドウ"
 
 #: client/scenes/gui_settings.cpp:817
 msgid ""
-"Enables the configuration window to be shown while the game is streaming. If "
-"enabled, the window is activated by pressing both thumbsticks."
+"Enables the configuration window to be shown while the game is streaming. Use "
+"the controller shortcut to open or close it; by default, press both thumbsticks."
 msgstr ""
-"ストリーミング中でもウィンドウを開けるようになります。両方のサムスティックを"
-"同時に押すと、ウィンドウが現れます。"
+"ストリーミング中でもウィンドウを開けるようになります。コントローラーの"
+"ショートカットで開閉します。初期設定では両方のサムスティックを同時に押します。"
+
+msgctxt "setting name"
+msgid "In-stream window shortcut"
+msgstr "体験中ウィンドウのショートカット"
+
+msgid "Choose how to open or close the in-stream window. On Steam Frame, hold the right system button for one second. If Steam handles the button instead, use both thumbsticks."
+msgstr "体験中ウィンドウの開閉操作を選びます。Steam Frameでは右システムボタンを1秒長押しできます。Steam側の操作になる場合は、両方のサムスティックを選んでください。"
+
+msgid "Both thumbsticks"
+msgstr "両方のサムスティック同時押し"
+
+msgid "Right system button (hold)"
+msgstr "右システムボタン長押し"
+
+msgid "Enable the in-stream window to change its shortcut."
+msgstr "ショートカットを変更するには、体験中ウィンドウを有効にしてください。"
 
 #: client/scenes/gui_settings.cpp:833
 msgctxt "page header title"

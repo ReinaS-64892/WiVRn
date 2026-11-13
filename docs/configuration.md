@@ -398,3 +398,28 @@ For an ADB TCP-only WiVRn connection, also reverse this TCP port (for example,
 `adb reverse tcp:9758 tcp:9758`). TCP application forwarding can then work over
 that separate connection. UDP forwarding requires IP connectivity; it does not
 fall back to the VR TCP connection or to ADB TCP forwarding.
+
+## Headset: in-stream window shortcut (Steam Frame)
+
+In the headset's **Settings > System**, **In-stream window shortcut** selects
+either **Both thumbsticks** (the default, pressed together) or **Right system
+button (hold)** (held for one second). Only the selected shortcut opens or closes
+the window. The selector appears when the runtime supports Steam Frame controllers.
+The selection is saved on the headset as `stream_gui_right_system_long_press`
+(`false` for thumbsticks, `true` for the system button), separately from the PC
+configuration above. **In-stream window** must also be enabled.
+
+The long press fires once per hold. Release the button before pressing again;
+losing focus, losing input, or changing shortcuts cancels a pending hold. In this
+mode the right system click is reserved for WiVRn and is not forwarded to the PC.
+
+Valve's [Steam Frame input reference](https://partner.steamgames.com/doc/steamhardware/steamframe/input)
+exposes `/user/hand/right/input/system/click` as a boolean input through
+`XR_VALVE_frame_controller_interaction`. Long presses are detected by WiVRn from
+that pressed state; there is no separate long-press input in the reference.
+However, Valve also documents a Steam-button hold for dashboard recentering in
+the [Steam Frame guide](https://help.steampowered.com/en/faqs/view/2668-0B6E-79E0-A85B).
+The published input path does not establish whether the headset runtime delivers
+an uninterrupted hold to WiVRn or whether Steam also handles it. This requires
+testing on a physical Frame. If Steam intercepts it, disconnect and select
+**Both thumbsticks** in the headset lobby's settings.

@@ -28,6 +28,7 @@
 #include "render/imgui_impl.h"
 #include "scene.h"
 #include "scenes/input_profile.h"
+#include "scenes/menu_long_press.h"
 #include "stream_defoveator.h"
 #include "utils/thread_safe.h"
 #include "wifi_lock.h"
@@ -104,6 +105,8 @@ private:
 		bool check(XrTime now);
 	};
 	chord_state menu_chord = {};
+	XrAction menu_system = XR_NULL_HANDLE;
+	menu_long_press menu_system_long_press;
 	chord_state gamepad_chord = {.clicks_needed = 2};
 
 	bool using_frame_gamepad() const

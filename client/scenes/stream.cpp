@@ -565,6 +565,7 @@ void scenes::stream::on_focused()
 
 	menu_chord.a = get_action("menu_toggle_1").first;
 	menu_chord.b = get_action("menu_toggle_2").first;
+	menu_system = get_action("menu_system").first;
 	gamepad_chord.a = get_action("gamepad_mode_1").first;
 	gamepad_chord.b = get_action("gamepad_mode_2").first;
 	recenter_left = get_action("recenter_left").first;
@@ -590,6 +591,8 @@ void scenes::stream::on_focused()
 
 void scenes::stream::on_unfocused()
 {
+	menu_chord.reset();
+	menu_system_long_press.reset();
 	renderer->wait_idle(); // Must be before the scene data because the renderer uses its descriptor sets;
 	world.clear();
 	input.reset();
@@ -846,6 +849,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	std::shared_lock lock(decoder_mutex);
 	if (not frame_state.shouldRender or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
 	{
+		menu_system_long_press.reset();
 		// TODO: stop/restart video stream
 		session.begin_frame();
 		session.end_frame(frame_state.predictedDisplayTime, {});
@@ -1283,7 +1287,26 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 	read_actions();
 
-	if (application::get_config().enable_stream_gui and menu_chord.check(now))
+	const auto & config = application::get_config();
+	bool toggle_menu = false;
+	if (not config.enable_stream_gui)
+	{
+		menu_chord.reset();
+		menu_system_long_press.reset();
+	}
+	else if (config.stream_gui_right_system_long_press)
+	{
+		menu_chord.reset();
+		auto value = application::read_action_bool(menu_system);
+		toggle_menu = menu_system_long_press.check(value ? std::optional<bool>(value->second) : std::nullopt, now);
+	}
+	else
+	{
+		menu_system_long_press.reset();
+		toggle_menu = menu_chord.check(now);
+	}
+
+	if (toggle_menu)
 	{
 		// Arbitrary transitions can happen from network commands
 		// Ensure we can't have a set of 2 non interactable states
@@ -1405,6 +1428,7 @@ scene::meta & scenes::stream::get_meta_scene()
 
 	                {"menu_toggle_1", XR_ACTION_TYPE_BOOLEAN_INPUT},
 	                {"menu_toggle_2", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"menu_system", XR_ACTION_TYPE_BOOLEAN_INPUT},
 	                {"gamepad_mode_1", XR_ACTION_TYPE_BOOLEAN_INPUT},
 	                {"gamepad_mode_2", XR_ACTION_TYPE_BOOLEAN_INPUT},
 
@@ -1465,6 +1489,7 @@ scene::meta & scenes::stream::get_meta_scene()
 	                        {
 	                                {"gamepad_mode_1", "/user/hand/left/input/squeeze/click"},
 	                                {"gamepad_mode_2", "/user/hand/right/input/squeeze/click"},
+	                                {"menu_system", "/user/hand/right/input/system/click"},
 	                        },
 	                },
 	                suggested_binding{
@@ -1512,6 +1537,11 @@ void scenes::stream::on_xr_event(const xr::event & event)
 			});
 			break;
 		case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED:
+			if (event.state_changed.state != XR_SESSION_STATE_FOCUSED)
+			{
+				menu_chord.reset();
+				menu_system_long_press.reset();
+			}
 			// Override session state if the GUI is interactable
 			if (event.state_changed.state == XR_SESSION_STATE_FOCUSED and is_gui_interactable())
 				network_session->send_control(from_headset::session_state_changed{

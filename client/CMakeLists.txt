@@ -7,6 +7,13 @@ set(KTX_FEATURE_LOADTEST_APPS OFF)
 
 set(FASTGLTF_COMPILE_AS_CPP20 ON)
 
+if(WIVRN_BUILD_TEST AND NOT ANDROID)
+    enable_testing()
+    add_executable(wivrn-menu-long-press-test tests/menu_long_press.cpp)
+    target_include_directories(wivrn-menu-long-press-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME menu-long-press COMMAND wivrn-menu-long-press-test)
+endif()
+
 set(SPIRV_REFLECT_EXECUTABLE OFF)
 set(SPIRV_REFLECT_STATIC_LIB ON)
 set(SPIRV_REFLECT_INSTALL OFF)

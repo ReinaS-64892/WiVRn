@@ -175,7 +175,12 @@ void scenes::stream::read_actions()
 				case XR_ACTION_TYPE_BOOLEAN_INPUT: {
 					auto value = application::read_action_bool(action);
 					if (value)
-						inputs.values.push_back({output_id, (float)value->second, value->first});
+					{
+						// The selected menu shortcut must not also open the PC's system menu.
+						const auto & config = application::get_config();
+						const bool menu_button = id == device_id::RIGHT_SYSTEM_CLICK and config.enable_stream_gui and config.stream_gui_right_system_long_press;
+						inputs.values.push_back({output_id, menu_button ? 0.0f : (float)value->second, value->first});
+					}
 				}
 				break;
 

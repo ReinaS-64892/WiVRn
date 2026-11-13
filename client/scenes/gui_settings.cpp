@@ -438,7 +438,7 @@ void settings_streaming(const settings_context & ctx)
 	if (wivrn::ui::confirm_modal(
 	            "confirm disable in stream gui",
 	            _C("confirmation messagebox title", "Disable in-stream window"),
-	            _C("confirmation message", "Do you really want to disable the in-stream window?\nYou will not be able to re-open it with the thumbsticks."),
+	            _C("confirmation message", "Do you really want to disable the in-stream window?\nYou will not be able to re-open it with the controller shortcut."),
 	            _("Yes"),
 	            _("No"),
 	            true) == 1)
@@ -839,7 +839,7 @@ void settings_system(const settings_context & ctx)
 	list.push_back({
 	        .id = "##stream_gui",
 	        .label = _C("setting name", "In-stream window"),
-	        .description = _("Enables the configuration window to be shown while the game is streaming. If enabled, the window is activated by pressing both thumbsticks."),
+	        .description = _("Enables the configuration window to be shown while the game is streaming. Use the controller shortcut to open or close it; by default, press both thumbsticks."),
 	        .ui = ui_kind::toggle,
 	        .get_bool = [&config, &disable_instream_gui_popup_open] { return config.enable_stream_gui and not disable_instream_gui_popup_open; },
 	        .set_bool = [&ctx, &config, &disable_instream_gui](bool v) {
@@ -854,6 +854,23 @@ void settings_system(const settings_context & ctx)
 			} },
 	        .default_bool = default_config.enable_stream_gui,
 	});
+
+	if (ctx.instance.has_extension("XR_VALVE_frame_controller_interaction"))
+	{
+		list.push_back({
+		        .id = "##stream_gui_shortcut",
+		        .label = _C("setting name", "In-stream window shortcut"),
+		        .description = _("Choose how to open or close the in-stream window. On Steam Frame, hold the right system button for one second. If Steam handles the button instead, use both thumbsticks."),
+		        .ui = ui_kind::combo,
+		        .get_int = [&config] { return config.stream_gui_right_system_long_press ? 1 : 0; },
+		        .set_int = [&config](int v) { config.stream_gui_right_system_long_press = v == 1; config.save(); },
+		        .options = [] { return std::vector<std::string>{_("Both thumbsticks"), _("Right system button (hold)")}; },
+		        .title = _C("setting name", "In-stream window shortcut"),
+		        .default_int = default_config.stream_gui_right_system_long_press ? 1 : 0,
+		        .enabled = [&config] { return config.enable_stream_gui; },
+		        .disabled_tooltip = _("Enable the in-stream window to change its shortcut."),
+		});
+	}
 
 	ui::page_header(_cS("page header title", "System"), _cS("page header suibtitle", "Language and advanced options."));
 	render_settings(ctx, "##system", list);

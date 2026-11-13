@@ -318,6 +318,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("resolution_scale", &configuration::resolution_scale),
 	        scalar("bitrate_bps", &configuration::bitrate_bps),
 	        scalar("enable_stream_gui", &configuration::enable_stream_gui),
+	        scalar("stream_gui_right_system_long_press", &configuration::stream_gui_right_system_long_press),
 	        scalar("app_list_view", &configuration::app_list_view),
 	        scalar("app_icon_size", &configuration::app_icon_size),
 	        scalar("theme_preset", &configuration::theme_preset),
