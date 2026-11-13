@@ -22,10 +22,10 @@ int main()
     auto check = [&](bool valid, vr::ETrackingResult result) {
         device.UpdateBase(base);
         auto pose = device.GetPose();
-        CHECK(pose.poseIsValid == valid, "validity matches room readiness");
+        CHECK(pose.poseIsValid == (valid && base.seen), "validity requires room readiness and live sightings");
         CHECK(pose.result == result, "tracking result matches room readiness");
         CHECK(pose.deviceIsConnected == base.seen, "connection follows live sightings");
-        CHECK(g.devices[0].last.poseIsValid == valid && g.devices[0].last.result == result,
+        CHECK(g.devices[0].last.poseIsValid == (valid && base.seen) && g.devices[0].last.result == result,
               "the host receives the same readiness as GetPose");
     };
     check(false, vr::TrackingResult_Uninitialized);

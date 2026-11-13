@@ -214,6 +214,9 @@ Monado runtime. `WIVRN_USE_OPENHOUSE` also requests this backend.
 
 WiVRn fetches the source pinned in `openhouse-rev`, builds
 `libwivrn-openhouse.so`, and directly links its private OpenVR provider factory.
+The pin currently uses `Zakhazerd/openhouse-public`'s
+`fix/pairing-and-dongle-switch` branch, including pairing command handling,
+idle dongle keepalives and device setup after a dongle switches devices.
 The Monado host is copied from steamvr_lh *after* applying the complete Monado
 patch series. It has independent symbols and lifecycle, retaining prediction,
 controller roles, hotplug, hands, base station stabilization and tracker standby.

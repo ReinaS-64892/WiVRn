@@ -296,7 +296,7 @@ FetchContent_Declare(monado
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS openhouse-rev)
 file(STRINGS openhouse-rev OPENHOUSE_REV)
 FetchContent_Declare(openhouse
-    GIT_REPOSITORY https://github.com/YusufOzmen01/openhouse.git
+    GIT_REPOSITORY https://github.com/Zakhazerd/openhouse-public.git
     GIT_TAG ${OPENHOUSE_REV}
     EXCLUDE_FROM_ALL
 )

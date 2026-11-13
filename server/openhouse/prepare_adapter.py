@@ -38,7 +38,7 @@ def prepare_provider(source, destination):
     text = replace_once(source.read_text(),
         "    // Until it's locked (or is the origin) it shows as searching (a blinking icon): its\n"
         "    // place can still move. Learned but not locked yet: calibrating.\n"
-        "    const bool settled = b.known && (b.origin || b.locked);",
+        "    const bool settled = b.known && (b.origin || b.locked || b.learned);  // learned: placed well enough to track with",
         "    // Use the runtime's accuracy/evidence threshold for tracking and alignment.\n"
         "    // Locking only controls whether the room solver keeps refining this base.\n"
         "    const bool settled = b.known && b.learned;")
