@@ -35,10 +35,21 @@ def prepare_provider(source, destination):
     # A learned base is accurate enough for alignment before RoomMap::Locked
     # freezes further refinement (100 keyframes). Match the runtime's public
     # readiness flag instead of hiding learned, still-refining bases from xdev.
-    text = replace_once(source.read_text(),
+    text = source.read_text()
+    old_prefix = (
         "    // Until it's locked (or is the origin) it shows as searching (a blinking icon): its\n"
-        "    // place can still move. Learned but not locked yet: calibrating.\n"
+        "    // place can still move. Learned but not locked yet: calibrating.\n")
+    # The current pin also accepts learned bases upstream, but still treats
+    # origin/locked as sufficient. Keep the adapter's learned-only policy for
+    # both versions, and reject unrecognized provider changes.
+    old_blocks = [old_prefix + line for line in (
         "    const bool settled = b.known && (b.origin || b.locked);",
+        "    const bool settled = b.known && (b.origin || b.locked || b.learned);  // learned: placed well enough to track with",
+    )]
+    if sum(text.count(block) for block in old_blocks) != 1:
+        raise RuntimeError("Openhouse provider changed: expected one recognized base readiness block")
+    old = next(block for block in old_blocks if block in text)
+    text = replace_once(text, old,
         "    // Use the runtime's accuracy/evidence threshold for tracking and alignment.\n"
         "    // Locking only controls whether the room solver keeps refining this base.\n"
         "    const bool settled = b.known && b.learned;")
