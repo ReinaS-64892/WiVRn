@@ -57,7 +57,7 @@ class stream_defoveator
 	void ensure_vertices(size_t num_vertices);
 	vertex * get_vertices(size_t view);
 
-	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a);
+	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool manual_rgb, bool manual_a);
 
 public:
 	struct input
@@ -70,6 +70,8 @@ public:
 		vk::Sampler sampler_a;
 		vk::Rect2D rect_a;
 		vk::ImageLayout layout_a;
+		bool manual_rgb = false;
+		bool manual_a = false;
 	};
 
 	stream_defoveator(
