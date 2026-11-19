@@ -20,6 +20,7 @@
 #pragma once
 
 #include "decoder.h"
+#include "video_packet_audit.h"
 #include "wivrn_packets.h"
 
 #include <memory>
@@ -74,6 +75,7 @@ private:
 	shard_set next;
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
+	video_packet_audit packet_audit;
 
 public:
 	explicit shard_accumulator(
@@ -83,15 +85,7 @@ public:
 	        uint32_t vk_queue_family_index,
 	        const wivrn::to_headset::video_stream_description & description,
 	        std::weak_ptr<scenes::stream> scene,
-	        uint8_t stream_index) :
-	        decoder_(decoder::make(device, physical_device, vk_queue_family_index, description, stream_index, scene, this)),
-	        current(stream_index),
-	        next(stream_index),
-	        weak_scene(scene),
-	        instance(instance)
-	{
-		next.reset(1);
-	}
+	        uint8_t stream_index);
 
 	void push_shard(wivrn::to_headset::video_stream_data_shard &&);
 
@@ -107,6 +101,7 @@ public:
 	using blit_handle = decoder::blit_handle;
 
 private:
+	void push_shard_impl(wivrn::to_headset::video_stream_data_shard &&);
 	void try_submit_frame(std::optional<uint16_t> shard_idx);
 	void try_submit_frame(uint16_t shard_idx);
 	void send_feedback(wivrn::from_headset::feedback & feedback);

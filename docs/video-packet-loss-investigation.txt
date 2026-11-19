@@ -6,7 +6,99 @@ WiVRn 映像パケットロス計測：初期調査
 目的
   FEC の方式を決める前に、映像 UDP の欠落頻度、連続性、表示への影響を測る。
   この段階では送信方式、デコード待ち時間、IDR 復旧の動作を変更しない。
-  本書はコード調査の結果であり、実機で測定した結果ではない。
+  コード調査に加え、下記の計測コードと集計ツールを実装した。
+  実機の無線通信で測定した結果はまだ含まない。
+
+実装済みの計測を使う
+  PC と HMD の両方で、このブランチのコードを通常の手順でビルドする。
+  プロトコルは変更していないが、両端の計測ログが必要。
+  初回は短い 30〜60 秒程度の接続１回で試す。
+
+  PC サーバーを起動するシェルで、環境変数を設定してログを保存する。
+    WIVRN_PACKET_AUDIT=1 XRT_LOG=info wivrn-server > server-audit.log 2>&1
+  実際に起動するのは、このブランチからビルドしたバイナリー。
+  ダッシュボード等から起動する場合も、サーバープロセスに変数を渡す。
+
+  Android HMD では、WiVRn を起動・接続する前に以下を実行する。
+    adb shell setprop debug.wivrn.packet_audit 1
+    adb logcat -v threadtime '*:S' WiVRn:I > client-audit.log
+  ２つ目のコマンドは別ターミナルで実行し、計測中は動かしておく。
+  既に接続中なら、いったん切断して接続し直す。
+  Linux クライアントの場合は次のように起動する。
+    WIVRN_PACKET_AUDIT=1 wivrn > client-audit.log 2>&1
+
+  普段の操作をした後、HMD の操作で正常に切断する。
+  サーバーを正常終了させてから、logcat の保存を止める。
+  両端の WIVRN_PACKET_AUDIT 行に begin / frame / end があることを確認する。
+  INFO ログを抑止すると計測できない。Android プロパティを読めない場合も
+  begin 行は出ないため、その状態での「ログなし」をロスゼロと扱わない。
+
+  集計（Python 3、追加パッケージ不要）:
+    python3 tools/video-packet-loss.py server-audit.log client-audit.log --stream 0
+    python3 tools/video-packet-loss.py server-audit.log client-audit.log --stream 1
+  stream は 0=左目、1=右目、2=alpha。
+  再接続などで候補が複数ある場合は、エラーに列挙される ID を指定する。
+    python3 tools/video-packet-loss.py server-audit.log client-audit.log --stream 0 --tx-capture 3 --rx-capture 1
+  ID は各プロセス内だけの番号であり、両端で同じ値になるとは限らない。
+  同じ接続のログ同士を選ぶ。別プロセス起動分を１ファイルに連結しない。
+
+  計測後は Android の設定を戻す。
+    adb shell setprop debug.wivrn.packet_audit 0
+  PC / Linux は環境変数を付けずに再起動すれば無効になる。
+
+出力の読み方
+  udp_missing_at_retirement_percent:
+    再構成を見切ったフレームの、OS に送信を受理された UDP shard に対する
+    見切り時点の未着率。後から届いたものもこの未着率には含む。
+  udp_received_late_unique:
+    見切り後に初めて届いた shard 数。通常受信の後の重複はここには含めない。
+  udp_not_received_by_capture_end:
+    送信成功扱いの UDP shard のうち、クライアントの計測終了まで未受信の数。
+    両端で接続全体のログが揃っていることが前提。無線区間だけのロスではない。
+  send_failed_or_inactive / tcp_accepted:
+    送信例外・無効な接続での送信と、TCP に送った映像を別集計する。
+  unfinalized_frames:
+    切断時にも再構成を見切っていない末尾のフレーム数。
+    これらは見切り時点の未着率の分母・分子に入れない。
+  missing_per_finalized_udp_frame / missing_per_8_shard_group:
+    フレームごと、およびフレーム内の shard 番号を８個ずつ区切った欠落数分布。
+    パリティ自体の欠落を含む FEC シミュレーションではない。
+  max_consecutive_missing_in_frame:
+    同一フレーム内で連続して欠けた UDP shard の最大数。
+  rx_duplicates_all_transports / rx_out_of_order_all_transports:
+    受信した全映像 shard の重複数と、既に見た最大番号より古い到着数。
+    後者には重複も含み、TCP の映像も対象になる。
+  per_tx_second:
+    サーバー側キャプチャ開始から１秒単位の送信数・未受信数・遅着数。
+
+計測の仕組みと制限
+  common/video_packet_audit.h が有効時だけパケット番号をビットマップで記録する。
+  ペイロードの内容は保存しない。通常は１フレーム１行で、大きなフレームは
+  logcat で切れない長さに分割する。通常受信時に毎パケットのログは出さない。
+  受信側は最大128フレーム分を保持して、古いものから出力する。
+  さらに遅い到着は追加フラグメントとして記録し、集計時に集合として統合する。
+  終了時に残りを出力するので、強制終了・途中からのログ取得は使用しない。
+  連番の欠落、壊れたJSON、endなしは集計エラーにして、低い欠落率を捏造しない。
+  フレーム番号が飛んでも、送信側に実際の記録がないフレームはロスに数えない。
+  送信成功は OS への引き渡しであり、電波での送信成功を保証しない。
+  OS のキュー、無線再送、デコーダー以降の表示遅延は直接は測定しない。
+  計測による負荷は実機で未評価。計測ON/OFFでの比較も行う。
+
+ローカルでのテスト実行
+    python3 tools/tests/test_video_packet_loss.py
+  C++ コンパイラーと Python 3 が必要。GPU・HMD は不要。
+  C++ の計測器から生成したログを Python の集計器で照合する。
+  欠落、遅着、重複、順序逆転、TCP、送信失敗、送信前スキップ、末尾未確定、
+  履歴から消えた後の到着、ログ分割、リセット、壊れたログを検証する。
+
+今回の検証結果
+  C++ 計測器が生成したログを使った12テストが成功。
+  AddressSanitizer / UndefinedBehaviorSanitizer を有効にした計測器でも成功。
+  送信処理、接続処理、セッション処理、受信処理の構文チェックが成功。
+  既存のビルド設定には生成ヘッダー等の不足があったため、構文チェックは
+  一時ディレクトリーに生成した Vulkan ヘッダー等を補って実施した。
+  セッション処理の構文チェックでは Openhouse / libsurvive を無効にした。
+  アプリ全体のリンク、Android APK のビルド、実機測定は未実施。
 
 既存コードで分かったこと
   common/wivrn_packets.h: video_stream_data_shard
@@ -41,7 +133,7 @@ WiVRn 映像パケットロス計測：初期調査
   D. 未完成フレーム、デコード出力なし、同じ映像の再表示
      別々に数える。いずれも直接のパケットロス率ではない。
 
-最初の計測実装案
+初期設計方針（上記実装の元になった案）
   1. 明示的に有効化した場合だけ集計し、低頻度の構造化ログを出す。
      毎パケットの通常ログ出力は避ける。セッションとストリームで区別する。
   2. 受信側でユニーク受信数、重複、順序逆転、遅着を数える。

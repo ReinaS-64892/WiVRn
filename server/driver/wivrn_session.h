@@ -214,11 +214,11 @@ public:
 		return connection->has_stream();
 	}
 	template <typename T>
-	void send_stream(T && packet)
+	bool send_stream(T && packet)
 	{
 		try
 		{
-			connection->send_stream(std::forward<T>(packet));
+			return connection->send_stream(std::forward<T>(packet));
 		}
 		catch (std::exception & e)
 		{
@@ -228,11 +228,11 @@ public:
 	}
 
 	template <typename T>
-	void send_control(T && packet)
+	bool send_control(T && packet)
 	{
 		try
 		{
-			connection->send_control(std::forward<T>(packet));
+			return connection->send_control(std::forward<T>(packet));
 		}
 		catch (std::exception & e)
 		{

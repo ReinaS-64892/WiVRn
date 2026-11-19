@@ -21,6 +21,7 @@
 
 #include "driver/clock_offset.h"
 #include "idr_handler.h"
+#include "video_packet_audit.h"
 #include "wivrn_packets.h"
 
 #include <atomic>
@@ -108,6 +109,7 @@ private:
 	std::ofstream video_dump;
 
 	std::shared_ptr<sender> shared_sender;
+	video_packet_audit packet_audit;
 
 protected:
 	std::atomic_uint32_t pending_bitrate;

@@ -29,6 +29,24 @@ using namespace wivrn::to_headset;
 using shard_set = shard_accumulator::shard_set;
 using data_shard = shard_accumulator::data_shard;
 
+shard_accumulator::shard_accumulator(
+        vk::raii::Device & device,
+        vk::raii::PhysicalDevice & physical_device,
+        xr::instance & instance,
+        uint32_t vk_queue_family_index,
+        const video_stream_description & description,
+        std::weak_ptr<scenes::stream> scene,
+        uint8_t stream_index) :
+        decoder_(decoder::make(device, physical_device, vk_queue_family_index, description, stream_index, scene, this)),
+        current(stream_index),
+        next(stream_index),
+        weak_scene(scene),
+        instance(instance),
+        packet_audit("rx", stream_index, [](const std::string & line) { spdlog::info("{}", line); })
+{
+	next.reset(1);
+}
+
 shard_set::shard_set(uint8_t stream_index)
 {
 	feedback.stream_index = stream_index;
@@ -106,10 +124,17 @@ static void debug_why_not_sent(const shard_set & shards)
 void shard_accumulator::advance()
 {
 	std::swap(current, next);
+	packet_audit.retire_before(current.frame_index());
 	next.reset(current.frame_index() + 1);
 }
 
 void shard_accumulator::push_shard(video_stream_data_shard && shard)
+{
+	packet_audit.receive(shard.frame_idx, shard.shard_idx, shard.payload.size());
+	push_shard_impl(std::move(shard));
+}
+
+void shard_accumulator::push_shard_impl(video_stream_data_shard && shard)
 {
 	assert(current.frame_index() + 1 == next.frame_index());
 
@@ -144,7 +169,7 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 
 		advance();
 
-		push_shard(std::move(shard));
+		push_shard_impl(std::move(shard));
 	}
 	else
 	{
@@ -154,8 +179,9 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 
 		current.reset(shard.frame_idx);
 		next.reset(shard.frame_idx + 1);
+		packet_audit.retire_before(shard.frame_idx);
 
-		push_shard(std::move(shard));
+		push_shard_impl(std::move(shard));
 	}
 }
 
@@ -207,6 +233,7 @@ void shard_accumulator::try_submit_frame(uint16_t shard_idx)
 
 	// Try to extract a frame
 	decoder_->frame_completed(current.feedback, *data_shards.front()->view_info);
+	packet_audit.completed_frame(current.frame_index());
 
 	send_feedback(current.feedback);
 

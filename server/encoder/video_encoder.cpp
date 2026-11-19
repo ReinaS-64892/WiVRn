@@ -199,6 +199,7 @@ video_encoder::video_encoder(vk_bundle & vk,
         need_transfer(not vk.optimal_transfer(vk.queue.family_index, target_queue)),
         bitrate_multiplier(settings.bitrate_multiplier),
         shared_sender(async_send ? sender::get() : nullptr),
+        packet_audit("tx", stream_idx, [](const std::string & line) { U_LOG_I("%s", line.c_str()); }),
         idr(std::move(idr)),
         extent{
                 .width = settings.width,
@@ -223,6 +224,8 @@ void video_encoder::on_feedback(const from_headset::feedback & feedback)
 void video_encoder::reset()
 {
 	idr->reset();
+	std::lock_guard lock(mutex);
+	packet_audit.reset();
 }
 
 void video_encoder::set_bitrate(uint32_t bitrate_bps)
@@ -334,23 +337,28 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			}
 		}
 		shard.payload = {begin, next};
+		bool accepted = false;
 		try
 		{
 			if (control)
-				cnx->send_control(to_headset::video_stream_data_shard{shard});
+				accepted = cnx->send_control(to_headset::video_stream_data_shard{shard});
 			else
-				cnx->send_stream(to_headset::video_stream_data_shard{shard});
+				accepted = cnx->send_stream(to_headset::video_stream_data_shard{shard});
 		}
 		catch (...)
 		{
 			// Ignore network errors
 		}
+		packet_audit.send(shard.frame_idx, shard.shard_idx, shard.payload.size(), cnx->has_stream() and not control, accepted);
 		++shard.shard_idx;
 		shard.view_info.reset();
 		begin = next;
 	}
 	if (end_of_frame)
+	{
+		packet_audit.sent_frame(shard.frame_idx);
 		wivrn::trace::cpu_end(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
+	}
 }
 
 } // namespace wivrn

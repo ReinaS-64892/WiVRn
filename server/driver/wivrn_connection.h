@@ -83,12 +83,16 @@ public:
 	}
 
 	template <typename T>
-	void send_control(T && packet)
+	bool send_control(T && packet)
 	{
 		try
 		{
 			if (active)
+			{
 				control.send(std::forward<T>(packet));
+				return true;
+			}
+			return false;
 		}
 		catch (...)
 		{
@@ -98,7 +102,7 @@ public:
 	}
 
 	template <typename T>
-	void send_stream(T && packet)
+	bool send_stream(T && packet)
 	{
 		try
 		{
@@ -108,7 +112,9 @@ public:
 					stream.send(std::forward<T>(packet));
 				else
 					control.send(std::forward<T>(packet));
+				return true;
 			}
+			return false;
 		}
 		catch (...)
 		{
