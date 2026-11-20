@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "video_packet_audit.h"
+#include "video_packet_recording.h"
 
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 
 using wivrn::video_packet_audit;
 
@@ -77,6 +80,110 @@ int main()
 				tx.send(0, shard, 100, true, true);
 			tx.sent_frame(0);
 			// No packet reached RX; its end marker still defines a valid capture.
+		}
+		{
+			// Exercise the same runtime start/stop and shared file path as the UI.
+			char temporary[] = "/tmp/wivrn-packet-recording-XXXXXX";
+			if (not mkdtemp(temporary))
+				throw std::runtime_error("mkdtemp");
+			struct cleanup
+			{
+				std::filesystem::path path;
+				~cleanup()
+				{
+					std::error_code error;
+					std::filesystem::remove_all(path, error);
+				}
+			} cleanup{temporary};
+			auto read = [](const auto & path) {
+				std::ifstream input(path);
+				return std::string(std::istreambuf_iterator<char>(input), {});
+			};
+			auto file = std::make_shared<wivrn::packet_audit_file>(cleanup.path / "logs");
+			if ((std::filesystem::status(file->path()).permissions() & std::filesystem::perms::all) != (std::filesystem::perms::owner_read | std::filesystem::perms::owner_write))
+				throw std::runtime_error("recording file permissions");
+			video_packet_audit tx("tx", 6, sink, true);
+			for (uint64_t frame = 0; frame < 15; ++frame)
+			{
+				for (uint16_t shard = 0; shard < 2; ++shard)
+					tx.send(frame, shard, 100, true, true);
+				tx.sent_frame(frame);
+			}
+			wivrn::video_packet_recording recording(6);
+			recording.receive(7, 0, 100); // Before start; never appears in the file.
+			recording.start(file);
+			recording.receive(3, 0, 100); // Old packet must not move start backwards.
+			for (uint64_t frame: {8, 9, 11})
+			{
+				if (frame != 9)
+					recording.receive(frame, 0, 100);
+				recording.receive(frame, 1, 100);
+				if (frame != 9)
+					recording.completed_frame(frame);
+				recording.retire_before(frame + 1);
+			}
+			recording.receive(12, 0, 100); // Pending at stop: excluded by frame_limit.
+			recording.stop();
+			file->close();
+			if (not file->error().empty())
+				throw std::runtime_error(file->error());
+			auto first_log = read(file->path());
+			std::cout << first_log;
+			auto second = std::make_shared<wivrn::packet_audit_file>(cleanup.path / "logs");
+			recording.start(second);
+			recording.receive(13, 0, 100);
+			recording.receive(14, 0, 100);
+			recording.completed_frame(14);
+			recording.retire_before(15);
+			recording.stop();
+			second->close();
+			if (second->path() == file->path() or read(file->path()) != first_log or read(second->path()).find("\"first_frame\":14") == std::string::npos)
+				throw std::runtime_error("restart must use a new file and window");
+			bool failed = false;
+			try
+			{
+				wivrn::packet_audit_file invalid(file->path()); // Parent is a file.
+			}
+			catch (const std::exception &)
+			{
+				failed = true;
+			}
+			if (not failed)
+				throw std::runtime_error("directory creation failure not reported");
+			second->write("closed");
+			if (second->error().empty())
+				throw std::runtime_error("write failure not reported");
+			auto shared = std::make_shared<wivrn::packet_audit_file>(cleanup.path / "logs");
+			for (unsigned stream: {7, 8})
+			{
+				video_packet_audit tx("tx", stream, sink, true);
+				for (uint64_t frame = 100; frame < 113; ++frame)
+				{
+					for (uint16_t shard = 0; shard < 2; ++shard)
+						tx.send(frame, shard, 100, true, true);
+					tx.sent_frame(frame);
+				}
+			}
+			auto receive = [shared](unsigned stream) {
+				wivrn::video_packet_recording recording(stream);
+				recording.start(shared);
+				recording.receive(100, 0, 100);
+				for (uint64_t frame = 101; frame < 111; ++frame)
+				{
+					recording.receive(frame, 0, 100);
+					recording.receive(frame, 1, 100);
+					recording.completed_frame(frame);
+					recording.retire_before(frame + 1);
+				}
+				recording.stop();
+			};
+			std::jthread left(receive, 7), right(receive, 8);
+			left.join();
+			right.join();
+			shared->close();
+			if (not shared->error().empty())
+				throw std::runtime_error(shared->error());
+			std::cout << read(shared->path());
 		}
 		{
 			// Exercise chunk boundaries and the full uint16_t shard range.

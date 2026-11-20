@@ -1447,3 +1447,37 @@ msgstr "末尾のパケットを受信できず、総パケット数が不明な
 #: client/scenes/stream_gui.cpp
 msgid "Since stream setup; includes UDP and TCP video. Exact packet loss requires server logs."
 msgstr "ストリーム設定後の累計です。UDP・TCP の映像を含みます。正確なパケットロスの算出にはサーバーログが必要です。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Packet recording"
+msgstr "パケットログの記録"
+
+#: client/scenes/stream_gui.cpp
+msgid "Start packet recording"
+msgstr "パケットログの記録を開始"
+
+#: client/scenes/stream_gui.cpp
+msgid "Stop packet recording"
+msgstr "パケットログの記録を停止"
+
+#: client/scenes/stream_gui.cpp
+msgid "Recording video packets. Stop recording to finish the log."
+msgstr "映像パケットを記録中です。記録を停止するとログが完成します。"
+
+#: client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Log file: {}"
+msgstr "ログファイル：{}"
+
+#: client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Recording failed: {}"
+msgstr "記録に失敗しました：{}"
+
+#: client/scenes/stream_gui.cpp
+msgid "Recording saved."
+msgstr "記録を保存しました。"
+
+#: client/scenes/stream_gui.cpp
+msgid "No launch options are needed. Server logs are still required for exact packet loss."
+msgstr "起動オプションは不要です。正確なパケットロスの算出にはサーバーログが必要です。"

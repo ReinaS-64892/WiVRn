@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <functional>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -56,6 +57,7 @@ class video_packet_audit
 	const bool enabled;
 	const std::string side;
 	const unsigned stream;
+	const std::optional<uint64_t> first_frame;
 	std::function<void(const std::string &)> sink;
 	uint64_t capture = 0;
 	mutable uint64_t sequence = 0;
@@ -67,7 +69,7 @@ class video_packet_audit
 	std::ostringstream prefix(std::string_view event) const
 	{
 		std::ostringstream out;
-		out << "WIVRN_PACKET_AUDIT {\"v\":1,\"side\":\"" << side
+		out << "WIVRN_PACKET_AUDIT {\"v\":" << (first_frame ? 2 : 1) << ",\"side\":\"" << side
 		    << "\",\"stream\":" << stream << ",\"capture\":" << capture
 		    << ",\"seq\":" << sequence++ << ",\"event\":\"" << event << '"';
 		return out;
@@ -129,6 +131,8 @@ class video_packet_audit
 		frames.clear();
 		auto out = prefix("end");
 		out << ",\"retired_before\":" << retired_before;
+		if (first_frame)
+			out << ",\"frame_limit\":" << retired_before;
 		emit(std::move(out));
 	}
 
@@ -145,8 +149,8 @@ public:
 		return false;
 #endif
 	}
-	video_packet_audit(std::string_view side, unsigned stream, std::function<void(const std::string &)> sink, bool enabled = requested()) :
-	        enabled(enabled), side(side), stream(stream), sink(std::move(sink))
+	video_packet_audit(std::string_view side, unsigned stream, std::function<void(const std::string &)> sink, bool enabled = requested(), std::optional<uint64_t> first_frame = {}) :
+	        enabled(enabled), side(side), stream(stream), first_frame(first_frame), sink(std::move(sink))
 	{
 		if (enabled)
 			reset();
@@ -166,10 +170,13 @@ public:
 			finish();
 		capture = ++next_capture;
 		sequence = 0;
-		retired_before = 0;
+		retired_before = first_frame.value_or(0);
 		high_water = {};
 		start = std::chrono::steady_clock::now();
-		emit(prefix("begin"));
+		auto out = prefix("begin");
+		if (first_frame)
+			out << ",\"first_frame\":" << *first_frame;
+		emit(std::move(out));
 	}
 	void send(uint64_t index, uint16_t shard, size_t bytes, bool udp, bool accepted)
 	{
@@ -195,7 +202,7 @@ public:
 	}
 	void receive(uint64_t index, uint16_t shard, size_t bytes)
 	{
-		if (not enabled)
+		if (not enabled or (first_frame and index < *first_frame))
 			return;
 		auto & f = observe(index, shard, bytes);
 		if (index >= retired_before)

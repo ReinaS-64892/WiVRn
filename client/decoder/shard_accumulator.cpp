@@ -42,7 +42,8 @@ shard_accumulator::shard_accumulator(
         next(stream_index),
         weak_scene(scene),
         instance(instance),
-        packet_audit("rx", stream_index, [](const std::string & line) { spdlog::info("{}", line); })
+        packet_audit("rx", stream_index, [](const std::string & line) { spdlog::info("{}", line); }),
+        file_recording(stream_index)
 {
 	next.reset(1);
 }
@@ -134,7 +135,7 @@ void shard_accumulator::advance(bool complete)
 {
 	record_frame(current, complete);
 	std::swap(current, next);
-	packet_audit.retire_before(current.frame_index());
+	audit_retire_before(current.frame_index());
 	next.reset(current.frame_index() + 1);
 }
 
@@ -146,7 +147,24 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 	bool duplicate = frame and shard.shard_idx < frame->data.size() and frame->data[shard.shard_idx].has_value();
 	receive_stats.packet(shard.frame_idx, shard.shard_idx, shard.frame_idx < current.frame_index(), duplicate);
 	packet_audit.receive(shard.frame_idx, shard.shard_idx, shard.payload.size());
+	file_recording.receive(shard.frame_idx, shard.shard_idx, shard.payload.size());
 	push_shard_impl(std::move(shard));
+}
+
+void shard_accumulator::start_packet_recording(std::shared_ptr<packet_audit_file> file)
+{
+	file_recording.start(std::move(file));
+}
+
+void shard_accumulator::stop_packet_recording()
+{
+	file_recording.stop();
+}
+
+void shard_accumulator::audit_retire_before(uint64_t index)
+{
+	packet_audit.retire_before(index);
+	file_recording.retire_before(index);
 }
 
 void shard_accumulator::push_shard_impl(video_stream_data_shard && shard)
@@ -196,7 +214,7 @@ void shard_accumulator::push_shard_impl(video_stream_data_shard && shard)
 
 		current.reset(shard.frame_idx);
 		next.reset(shard.frame_idx + 1);
-		packet_audit.retire_before(shard.frame_idx);
+		audit_retire_before(shard.frame_idx);
 
 		push_shard_impl(std::move(shard));
 	}
@@ -251,6 +269,7 @@ void shard_accumulator::try_submit_frame(uint16_t shard_idx)
 	// Try to extract a frame
 	decoder_->frame_completed(current.feedback, *data_shards.front()->view_info);
 	packet_audit.completed_frame(current.frame_index());
+	file_recording.completed_frame(current.frame_index());
 
 	send_feedback(current.feedback);
 

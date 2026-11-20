@@ -124,7 +124,10 @@ private:
 
 	std::shared_mutex decoder_mutex;
 	std::optional<to_headset::video_stream_description> video_stream_description;
-	std::array<accumulator_images, decoder_count> decoders; // Locked by decoder_mutex
+	std::array<accumulator_images, decoder_count> decoders;     // Locked by decoder_mutex
+	std::shared_ptr<wivrn::packet_audit_file> packet_recording; // Locked by decoder_mutex
+	std::filesystem::path last_packet_recording_path;
+	std::string packet_recording_error;
 
 	std::optional<stream_defoveator> defoveator;
 
@@ -378,6 +381,7 @@ private:
 	void accumulate_metrics(XrTime predicted_display_time, const std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> & blit_handles, const gpu_timestamps & timestamps);
 	void gui_performance_metrics();
 	void gui_video_receive_metrics();
+	void gui_packet_recording_controls();
 	void gui_compact_view();
 	void gui_settings(float predicted_display_period);
 	void gui_bitrate_settings(float predicted_display_period);

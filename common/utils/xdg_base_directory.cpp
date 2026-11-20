@@ -20,6 +20,7 @@
 #include "strings.h"
 #include <cstdlib>
 #include <filesystem>
+#include <stdexcept>
 
 std::filesystem::path xdg_config_home()
 {
@@ -60,6 +61,15 @@ std::filesystem::path xdg_runtime_dir()
 		return xdg_runtime_dir;
 
 	return "/tmp";
+}
+
+std::filesystem::path xdg_state_home()
+{
+	if (const char * state = std::getenv("XDG_STATE_HOME"); state and std::filesystem::path(state).is_absolute())
+		return state;
+	if (const char * home = std::getenv("HOME"); home and std::filesystem::path(home).is_absolute())
+		return std::filesystem::path(home) / ".local/state";
+	throw std::runtime_error("Cannot determine state directory: set XDG_STATE_HOME or HOME");
 }
 
 std::vector<std::filesystem::path> xdg_config_dirs()

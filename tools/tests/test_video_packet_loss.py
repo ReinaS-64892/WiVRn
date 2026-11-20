@@ -25,7 +25,7 @@ class PacketLossTests(unittest.TestCase):
         if not fixture:
             fixture = str(Path(cls.temp.name) / "audit-fixture")
             root = TOOL.parents[1]
-            subprocess.run(["c++", "-std=c++23", "-Wall", "-Wextra", "-Werror",
+            subprocess.run(["c++", "-std=c++23", "-pthread", "-Wall", "-Wextra", "-Werror",
                             "-I", str(root / "common"), str(root / "common/tests/video_packet_audit.cpp"),
                             "-o", fixture], check=True)
         cls.raw = subprocess.check_output([fixture], text=True)
@@ -85,6 +85,28 @@ class PacketLossTests(unittest.TestCase):
         self.assertEqual(report["totals"]["udp_not_received_by_capture_end"], 8)
         self.assertEqual(report["totals"]["unfinalized_frames"], 1)
         self.assertIsNone(report["udp_missing_at_retirement_percent"])
+
+    def test_button_recording_window_excludes_before_start_and_after_stop(self):
+        report = self.report(6)
+        self.assertEqual(report["frame_window"], {"first_frame": 8, "frame_limit": 12})
+        self.assertEqual(report["totals"]["tx_frames"], 4)
+        self.assertEqual(report["totals"]["udp_accepted"], 8)
+        self.assertEqual(report["totals"]["udp_missing_at_retirement"], 3)
+        self.assertEqual(report["totals"]["udp_not_received_by_capture_end"], 3)
+        self.assertEqual(report["udp_missing_at_retirement_percent"], 37.5)
+
+    def test_empty_button_recording_window_rejected(self):
+        _, tx = audit.select(self.captures, "tx", 6)
+        rx = audit.Capture(first_frame=100, frame_limit=100, ended=True)
+        with self.assertRaisesRegex(ValueError, "no finalized frames"):
+            audit.compare(tx, rx)
+
+    def test_shared_recording_file_has_complete_records_per_stream(self):
+        for stream in (7, 8):
+            with self.subTest(stream=stream):
+                report = self.report(stream)
+                self.assertEqual(report["totals"]["udp_accepted"], 20)
+                self.assertEqual(report["udp_missing_at_retirement_percent"], 0)
 
     def altered_log(self, lines):
         path = Path(self.temp.name) / "altered.log"

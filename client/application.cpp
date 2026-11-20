@@ -1639,6 +1639,25 @@ void application::set_server_uri(std::string uri)
 	}
 }
 
+std::filesystem::path application::get_log_path()
+{
+#ifdef __ANDROID__
+	instance().setup_jni();
+	jni::object<""> act(instance().app_info.native_app->activity->clazz);
+	auto app = act.call<jni::object<"android/app/Application">>("getApplication");
+	auto ctx = app.call<jni::object<"android/content/Context">>("getApplicationContext");
+	if (auto logs = ctx.call<jni::object<"java/io/File">>("getExternalFilesDir", jni::string("logs")))
+		return std::string(logs.call<jni::string>("getAbsolutePath"));
+	// External app storage may be unavailable. Use the actual Android cache
+	// directory, not WiVRn's configuration/files directory.
+	if (auto cache = ctx.call<jni::object<"java/io/File">>("getCacheDir"))
+		return std::filesystem::path(std::string(cache.call<jni::string>("getAbsolutePath"))) / "logs";
+	throw std::runtime_error("No log directory is available");
+#else
+	return xdg_state_home() / "wivrn/logs";
+#endif
+}
+
 application::application(application_info info) :
         app_info(std::move(info))
 

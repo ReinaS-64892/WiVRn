@@ -1329,6 +1329,8 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		item = accumulator_images{
 		        .decoder = std::make_unique<shard_accumulator>(device, physical_device, instance, queue_family_index, description, weak_from_this(), stream_index),
 		};
+		if (packet_recording)
+			item.decoder->start_packet_recording(packet_recording);
 	}
 
 	if (defoveator)

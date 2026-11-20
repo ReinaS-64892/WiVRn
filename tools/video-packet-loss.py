@@ -31,6 +31,8 @@ class Capture:
     ended: bool = False
     retired_before: int = 0
     next_seq: int = 1
+    first_frame: int | None = None
+    frame_limit: int | None = None
 
 
 def read_log(path):
@@ -41,7 +43,7 @@ def read_log(path):
                 continue
             try:
                 record, _ = json.JSONDecoder().raw_decode(line.split(MARKER, 1)[1])
-                if record["v"] != 1 or record["side"] not in ("tx", "rx"):
+                if record["v"] not in (1, 2) or record["side"] not in ("tx", "rx"):
                     raise ValueError("unsupported record version/side")
                 key = (record["side"], record["stream"], record["capture"])
                 event = record["event"]
@@ -50,7 +52,12 @@ def read_log(path):
                         raise ValueError("invalid begin sequence")
                     if key in captures:
                         raise ValueError("repeated begin: do not concatenate separate process runs")
-                    captures[key] = Capture()
+                    first = record.get("first_frame")
+                    if record["v"] == 2 and first is None:
+                        raise ValueError("missing recording start frame")
+                    if first is not None and (not isinstance(first, int) or first < 0):
+                        raise ValueError("invalid recording start frame")
+                    captures[key] = Capture(first_frame=first)
                     continue
                 if key not in captures:
                     raise ValueError("missing begin record (log capture started too late)")
@@ -63,6 +70,11 @@ def read_log(path):
                 if event == "end":
                     capture.ended = True
                     capture.retired_before = int(record["retired_before"])
+                    if capture.first_frame is not None:
+                        limit = record["frame_limit"]
+                        if not isinstance(limit, int) or limit < capture.first_frame or limit != capture.retired_before:
+                            raise ValueError("invalid recording end frame")
+                        capture.frame_limit = limit
                 elif event == "frame":
                     offset = record["offset"]
                     if not isinstance(offset, int) or offset < 0 or offset > 65024 or offset % 512:
@@ -125,11 +137,20 @@ def compare(tx, rx):
     histogram = Counter()
     groups = Counter()
     seconds = defaultdict(Counter)
-    matched = set(tx.frames) & set(rx.frames)
-    if rx.frames and not matched:
+    def in_window(index):
+        return rx.first_frame is None or rx.first_frame <= index < rx.frame_limit
+
+    if rx.first_frame is not None and (rx.frame_limit is None or rx.frame_limit <= rx.first_frame):
+        raise ValueError("no finalized frames in recording; record for longer")
+    tx_frames = {index: frame for index, frame in tx.frames.items() if in_window(index)}
+    rx_frames = {index: frame for index, frame in rx.frames.items() if in_window(index)}
+    if not tx_frames:
+        raise ValueError("no TX frames in recording window; check capture pairing")
+    matched = set(tx_frames) & set(rx_frames)
+    if rx_frames and not matched:
         raise ValueError("no common frames; check stream/capture pairing")
-    for index, sent in sorted(tx.frames.items()):
-        received = rx.frames.get(index, Frame())
+    for index, sent in sorted(tx_frames.items()):
+        received = rx_frames.get(index, Frame())
         totals["incomplete_tx_frames"] += not sent.complete
         if not sent.complete:
             continue
@@ -163,7 +184,7 @@ def compare(tx, rx):
                         groups[((deadline_missing >> offset) & 255).bit_count()] += 1
         else:
             totals["unfinalized_frames"] += 1
-    for received in rx.frames.values():
+    for received in rx_frames.values():
         totals["rx_duplicates_all_transports"] += received.packets - received.seen.bit_count()
         totals["rx_out_of_order_all_transports"] += received.reordered
     denominator = totals["udp_finalized_accepted"]
@@ -174,6 +195,7 @@ def compare(tx, rx):
         "missing_per_finalized_udp_frame": dict(sorted(histogram.items())),
         "missing_per_8_shard_group": dict(sorted(groups.items())),
         "per_tx_second": {key: dict(value) for key, value in sorted(seconds.items())},
+        "frame_window": {"first_frame": rx.first_frame, "frame_limit": rx.frame_limit},
         "notes": [
             "Application video shards, not Wi-Fi retry counters or proof of radio loss.",
             "Missing at retirement includes late arrivals; unfinished tail is excluded from that rate.",

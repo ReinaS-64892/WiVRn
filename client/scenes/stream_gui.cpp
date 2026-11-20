@@ -165,6 +165,56 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	metrics_offset = (metrics_offset + 1) % global_metrics.size();
 }
 
+void scenes::stream::gui_packet_recording_controls()
+{
+	// render() already holds decoder_mutex. Individual recorders serialize
+	// start/stop with network callbacks and write into the shared file.
+	ImGui::TextUnformatted(_S("Packet recording"));
+	if (ImGui::Button(packet_recording ? _S("Stop packet recording") : _S("Start packet recording")))
+	{
+		if (packet_recording)
+		{
+			for (auto & item: decoders)
+				if (item.decoder)
+					item.decoder->stop_packet_recording();
+			packet_recording->close();
+			packet_recording_error = packet_recording->error();
+			packet_recording.reset();
+		}
+		else
+		{
+			packet_recording_error.clear();
+			last_packet_recording_path.clear();
+			try
+			{
+				auto file = std::make_shared<wivrn::packet_audit_file>(application::get_log_path());
+				last_packet_recording_path = file->path();
+				for (auto & item: decoders)
+					if (item.decoder)
+						item.decoder->start_packet_recording(file);
+				packet_recording = std::move(file);
+			}
+			catch (const std::exception & error)
+			{
+				for (auto & item: decoders)
+					if (item.decoder)
+						item.decoder->stop_packet_recording();
+				packet_recording_error = error.what();
+			}
+		}
+	}
+	auto error = packet_recording ? packet_recording->error() : packet_recording_error;
+	if (packet_recording and error.empty())
+		ImGui::TextWrapped("%s", _S("Recording video packets. Stop recording to finish the log."));
+	if (not last_packet_recording_path.empty())
+		ImGui::TextWrapped("%s", fmt::format(_F("Log file: {}"), last_packet_recording_path.string()).c_str());
+	if (not error.empty())
+		ImGui::TextWrapped("%s", fmt::format(_F("Recording failed: {}"), error).c_str());
+	else if (not packet_recording and not last_packet_recording_path.empty())
+		ImGui::TextUnformatted(_S("Recording saved."));
+	ImGui::TextWrapped("%s", _S("No launch options are needed. Server logs are still required for exact packet loss."));
+}
+
 void scenes::stream::gui_video_receive_metrics()
 {
 	// render() holds decoder_mutex; each counter snapshot also synchronizes
@@ -213,6 +263,7 @@ void scenes::stream::gui_video_receive_metrics()
 		ImGui::EndTable();
 	}
 	ImGui::TextWrapped("%s", _S("Since stream setup; includes UDP and TCP video. Exact packet loss requires server logs."));
+	gui_packet_recording_controls();
 	ImGui::Separator();
 }
 
@@ -495,6 +546,8 @@ void scenes::stream::gui_settings(float)
 			break;
 		case settings_page::system:
 			wivrn::gui::settings_system(ctx);
+			ImGui::Separator();
+			gui_packet_recording_controls();
 			break;
 		case settings_page::theme:
 			wivrn::gui::settings_theme(ctx);

@@ -409,6 +409,8 @@ public:
 		return instance().cache_path;
 	}
 
+	static std::filesystem::path get_log_path();
+
 	static std::chrono::nanoseconds get_cpu_time()
 	{
 		return instance().last_scene_cpu_time;
