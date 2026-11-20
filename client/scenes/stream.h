@@ -377,6 +377,7 @@ private:
 
 	void accumulate_metrics(XrTime predicted_display_time, const std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> & blit_handles, const gpu_timestamps & timestamps);
 	void gui_performance_metrics();
+	void gui_video_receive_metrics();
 	void gui_compact_view();
 	void gui_settings(float predicted_display_period);
 	void gui_bitrate_settings(float predicted_display_period);

@@ -121,8 +121,18 @@ static void debug_why_not_sent(const shard_set & shards)
 	spdlog::info("frame {} was not sent with {} data shards, {}{} missing", frame_idx, data, end ? "" : "at least ", missing);
 }
 
-void shard_accumulator::advance()
+void shard_accumulator::record_frame(const shard_set & frame, bool complete)
 {
+	if (frame.empty())
+		return;
+	size_t received = std::ranges::count_if(frame.data, [](const auto & shard) { return shard.has_value(); });
+	bool terminal = frame.data.back() and frame.data.back()->timing_info;
+	receive_stats.finish_frame(frame.data.size(), received, terminal, complete);
+}
+
+void shard_accumulator::advance(bool complete)
+{
+	record_frame(current, complete);
 	std::swap(current, next);
 	packet_audit.retire_before(current.frame_index());
 	next.reset(current.frame_index() + 1);
@@ -130,6 +140,11 @@ void shard_accumulator::advance()
 
 void shard_accumulator::push_shard(video_stream_data_shard && shard)
 {
+	const auto * frame = shard.frame_idx == current.frame_index() ? &current
+	                     : shard.frame_idx == next.frame_index()  ? &next
+	                                                              : nullptr;
+	bool duplicate = frame and shard.shard_idx < frame->data.size() and frame->data[shard.shard_idx].has_value();
+	receive_stats.packet(shard.frame_idx, shard.shard_idx, shard.frame_idx < current.frame_index(), duplicate);
 	packet_audit.receive(shard.frame_idx, shard.shard_idx, shard.payload.size());
 	push_shard_impl(std::move(shard));
 }
@@ -176,6 +191,8 @@ void shard_accumulator::push_shard_impl(video_stream_data_shard && shard)
 		// We have lost more than one frame
 		send_feedback(current.feedback);
 		send_feedback(next.feedback);
+		record_frame(current, false);
+		record_frame(next, false);
 
 		current.reset(shard.frame_idx);
 		next.reset(shard.frame_idx + 1);
@@ -237,7 +254,7 @@ void shard_accumulator::try_submit_frame(uint16_t shard_idx)
 
 	send_feedback(current.feedback);
 
-	advance();
+	advance(true);
 }
 
 void shard_accumulator::send_feedback(wivrn::from_headset::feedback & feedback)

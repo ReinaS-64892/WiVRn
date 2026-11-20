@@ -21,6 +21,7 @@
 
 #include "decoder.h"
 #include "video_packet_audit.h"
+#include "video_receive_stats.h"
 #include "wivrn_packets.h"
 
 #include <memory>
@@ -76,6 +77,7 @@ private:
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
 	video_packet_audit packet_audit;
+	video_receive_stats receive_stats;
 
 public:
 	explicit shard_accumulator(
@@ -88,6 +90,11 @@ public:
 	        uint8_t stream_index);
 
 	void push_shard(wivrn::to_headset::video_stream_data_shard &&);
+
+	video_receive_stats::snapshot reception_metrics() const
+	{
+		return receive_stats.read();
+	}
 
 	vk::Sampler sampler()
 	{
@@ -105,6 +112,7 @@ private:
 	void try_submit_frame(std::optional<uint16_t> shard_idx);
 	void try_submit_frame(uint16_t shard_idx);
 	void send_feedback(wivrn::from_headset::feedback & feedback);
-	void advance();
+	void record_frame(const shard_set &, bool complete);
+	void advance(bool complete = false);
 };
 } // namespace wivrn

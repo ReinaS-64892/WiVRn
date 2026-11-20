@@ -165,12 +165,64 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	metrics_offset = (metrics_offset + 1) % global_metrics.size();
 }
 
+void scenes::stream::gui_video_receive_metrics()
+{
+	// render() holds decoder_mutex; each counter snapshot also synchronizes
+	// with the network thread. Read once so every cell uses the same snapshot.
+	std::array<wivrn::video_receive_stats::snapshot, decoder_count> snapshots{};
+	int active = 0;
+	for (size_t i = 0; i < decoders.size(); ++i)
+		if (decoders[i].decoder)
+		{
+			snapshots[i] = decoders[i].decoder->reception_metrics();
+			++active;
+		}
+	if (active == 0)
+		return;
+
+	ImGui::TextUnformatted(_S("Video reception"));
+	if (ImGui::BeginTable("video_reception", active + 1, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn(_S("Metric"), ImGuiTableColumnFlags_WidthStretch, 2.5f);
+		const std::array names = {_("Left eye"), _("Right eye"), _("Alpha")};
+		for (size_t i = 0; i < decoders.size(); ++i)
+			if (decoders[i].decoder)
+				ImGui::TableSetupColumn(names[i].c_str(), ImGuiTableColumnFlags_WidthStretch, 1.f);
+		ImGui::TableHeadersRow();
+
+		auto row = [&](const char * label, auto value, const char * tooltip = nullptr) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(label);
+			if (tooltip and ImGui::IsItemHovered())
+				imgui_ctx->tooltip(tooltip);
+			for (size_t i = 0; i < decoders.size(); ++i)
+				if (decoders[i].decoder)
+				{
+					ImGui::TableNextColumn();
+					ImGui::TextUnformatted(value(snapshots[i]).c_str());
+				}
+		};
+		row(_S("Received packets"), [](const auto & s) { return std::to_string(s.received_packets); });
+		row(_S("Late packets"), [](const auto & s) { return std::to_string(s.late_packets); }, _S("Packets arriving after their frame was discarded or completed. Includes late duplicates."));
+		row(_S("Buffered duplicates"), [](const auto & s) { return std::to_string(s.buffered_duplicates); }, _S("Repeated packets for frames still in the receive buffer."));
+		row(_S("Out-of-order packets"), [](const auto & s) { return std::to_string(s.out_of_order_packets); }, _S("Packets older than the highest received frame and packet number. Includes duplicates."));
+		row(_S("Incomplete frames"), [](const auto & s) { return s.finalized_frames() ? fmt::format("{} / {} ({:.1f}%)", s.incomplete_frames, s.finalized_frames(), s.incomplete_percent()) : std::string("--"); }, _S("Incomplete frames among received frames that were completed or discarded. Frames with no received packets are excluded."));
+		row(_S("Missing packets (minimum)"), [](const auto & s) { return std::to_string(s.missing_packets_min); }, _S("Minimum packets missing when a received frame was discarded. Later arrivals do not reduce this count."));
+		row(_S("Frames with unknown total"), [](const auto & s) { return std::to_string(s.frames_with_unknown_total); }, _S("Discarded frames whose final packet was not received, so their total packet count is unknown."));
+		ImGui::EndTable();
+	}
+	ImGui::TextWrapped("%s", _S("Since stream setup; includes UDP and TCP video. Exact packet loss requires server logs."));
+	ImGui::Separator();
+}
+
 void scenes::stream::gui_performance_metrics()
 {
 	const ImGuiStyle & style = ImGui::GetStyle();
 	const wivrn::ui::theme & t = wivrn::ui::current();
 
-	ImVec2 window_size = ImGui::GetWindowSize() - ImVec2(2, 2) * style.WindowPadding;
+	gui_video_receive_metrics();
+	ImVec2 window_size = ImGui::GetContentRegionAvail();
 
 	const std::array plots = {
 	        // clang-format off
@@ -191,7 +243,7 @@ void scenes::stream::gui_performance_metrics()
 
 	ImVec2 plot_size = ImVec2(
 	        window_size.x / n_cols - style.ItemSpacing.x * (n_cols - 1) / n_cols,
-	        (window_size.y - 2 * ImGui::GetCurrentContext()->FontSize - 2 * style.ItemSpacing.y) / n_rows - style.ItemSpacing.y * (n_rows - 1) / n_rows);
+	        std::max(120.f, (window_size.y - 2 * ImGui::GetCurrentContext()->FontSize - 2 * style.ItemSpacing.y) / n_rows - style.ItemSpacing.y * (n_rows - 1) / n_rows));
 
 	ImPlot::PushStyleColor(ImPlotCol_PlotBg, ImVec4{t.background.x, t.background.y, t.background.z, 0.8f});
 	ImPlot::PushStyleColor(ImPlotCol_PlotBorder, t.border);

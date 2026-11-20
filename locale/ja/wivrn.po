@@ -1371,3 +1371,79 @@ msgstr "暗証番号を確認できませんでした"
 #: client/wivrn_client.cpp:194
 msgid "Pairing is disabled on server"
 msgstr "このサーバーではペアリングが無効です"
+
+#: client/scenes/stream_gui.cpp
+msgid "Video reception"
+msgstr "映像の受信状況"
+
+#: client/scenes/stream_gui.cpp
+msgid "Metric"
+msgstr "項目"
+
+#: client/scenes/stream_gui.cpp
+msgid "Left eye"
+msgstr "左目"
+
+#: client/scenes/stream_gui.cpp
+msgid "Right eye"
+msgstr "右目"
+
+#: client/scenes/stream_gui.cpp
+msgid "Alpha"
+msgstr "アルファ"
+
+#: client/scenes/stream_gui.cpp
+msgid "Received packets"
+msgstr "受信パケット数"
+
+#: client/scenes/stream_gui.cpp
+msgid "Late packets"
+msgstr "遅着パケット数"
+
+#: client/scenes/stream_gui.cpp
+msgid "Buffered duplicates"
+msgstr "バッファ内の重複数"
+
+#: client/scenes/stream_gui.cpp
+msgid "Out-of-order packets"
+msgstr "順序が逆転したパケット数"
+
+#: client/scenes/stream_gui.cpp
+msgid "Incomplete frames"
+msgstr "未完成フレーム数"
+
+#: client/scenes/stream_gui.cpp
+msgid "Missing packets (minimum)"
+msgstr "欠落パケット数の下限"
+
+#: client/scenes/stream_gui.cpp
+msgid "Frames with unknown total"
+msgstr "総パケット数が不明なフレーム数"
+
+#: client/scenes/stream_gui.cpp
+msgid "Packets arriving after their frame was discarded or completed. Includes late duplicates."
+msgstr "フレームの破棄・完了後に到着したパケット数です。遅着した重複も含みます。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Repeated packets for frames still in the receive buffer."
+msgstr "受信バッファに保持しているフレームに対して重複して届いたパケット数です。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Packets older than the highest received frame and packet number. Includes duplicates."
+msgstr "受信済みの最大フレーム番号・パケット番号よりも前のパケット数です。重複も含みます。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Incomplete frames among received frames that were completed or discarded. Frames with no received packets are excluded."
+msgstr "受信後に完了または破棄したフレームのうち、未完成だった数と割合です。パケットを一つも受信していないフレームは含みません。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Minimum packets missing when a received frame was discarded. Later arrivals do not reduce this count."
+msgstr "受信したフレームを破棄した時点での欠落数の下限です。その後に届いても、この値は減りません。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Discarded frames whose final packet was not received, so their total packet count is unknown."
+msgstr "末尾のパケットを受信できず、総パケット数が不明なまま破棄したフレーム数です。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Since stream setup; includes UDP and TCP video. Exact packet loss requires server logs."
+msgstr "ストリーム設定後の累計です。UDP・TCP の映像を含みます。正確なパケットロスの算出にはサーバーログが必要です。"
