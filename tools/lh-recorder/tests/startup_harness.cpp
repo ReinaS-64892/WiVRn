@@ -6,7 +6,13 @@ std::unique_ptr<wivrn::lighthouse::usb_capture> make_denied_capture();
 unsigned synthetic_capture_instances();
 #include "os/os_time.h"
 #include "reference_recorder.hpp"
+#if WIVRN_FEATURE_SURVIVE
+#include "survive_recording.h"
+extern "C" void survive_simple_close(SurviveSimpleContext *);
+#endif
+#include <cstdlib>
 #include <stdexcept>
+#include <zlib.h>
 
 // Verify the steady_clock domain used by Monado's private chrono_timestamp_ns().
 #include <chrono>
@@ -29,6 +35,31 @@ int main(int argc, char ** argv)
 	wivrn::lighthouse::set_test_capture_factory(argc == 3 && std::string_view(argv[2]) == "real" ? nullptr : argc == 3 && std::string_view(argv[2]) == "deny" ? make_denied_capture
 	                                                                                                                                                          : make_synthetic_capture);
 	wivrn::start_lighthouse_recording(snapshot);
+#if WIVRN_FEATURE_SURVIVE
+	if (argc == 3 && (std::string_view(argv[2]) == "survive-empty" || std::string_view(argv[2]) == "survive-corrupt"))
+	{
+		char name[] = "empty-replay", playback[] = "--playback", file[] = "/dev/null", gss[] = "--globalscenesolver", yes[] = "1", state[] = "--kalman-minimize-state-space", zero[] = "0";
+		char * args[] = {name, playback, file, gss, yes, state, zero};
+		auto * ctx = survive_recording_init_context(7, args);
+		if (!ctx)
+			throw std::runtime_error("native replay init failed");
+		survive_simple_close(ctx);
+		if (std::string_view(argv[2]) == "survive-corrupt")
+		{
+			auto path = std::string(std::getenv("LH_RECORDER_OUTPUT")) + "/native.rec.gz";
+			auto file = gzopen(path.c_str(), "ab");
+			if (!file)
+				throw std::runtime_error("cannot append native fixture");
+			const char records[] = "0 WM1 POSE 0\0 0\n0 WM1 POSE 0\n";
+			gzwrite(file, records, sizeof(records) - 1);
+			gzclose(file);
+		}
+		wivrn::stop_lighthouse_recording(0);
+		if (synthetic_capture_instances() != 0)
+			throw std::runtime_error("survive opened USB observer");
+		return 0;
+	}
+#endif
 	lighthouse_reference::device("synthetic-tracker", vr::TrackedDeviceClass_GenericTracker);
 	vr::DriverPose_t p{};
 	p.qRotation.w = p.qWorldFromDriverRotation.w = p.qDriverFromHeadRotation.w = 1;

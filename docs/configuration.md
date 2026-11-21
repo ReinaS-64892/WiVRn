@@ -157,7 +157,10 @@ Default value: `false`
 
 Only available when built with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE`.
 
-Enables the driver to load SteamVR Lighthouse devices.
+Enables the driver to load SteamVR Lighthouse devices. In the dashboard, select
+**Advanced options → Lighthouse backend → SteamVR (steamvr_lh)** and restart the
+internal Monado runtime to apply. All three Lighthouse backends can be included in the
+same build; the selector activates one backend at a time.
 
 While a runtime session is running, the dashboard's **Turn off all trackers**
 button sends `EnterStandby()` to all Lighthouse trackers, including devices added
@@ -165,12 +168,114 @@ after startup. Controllers and base stations are excluded. The action also works
 while the session is waiting for the headset to reconnect. It requests standby;
 the individual device's driver determines whether the hardware powers off.
 
+## `use-survive`
+Default value: `false`
+
+Enables Lighthouse controllers and trackers through libsurvive. In the dashboard,
+select **Advanced options → Lighthouse backend → libsurvive** and
+restart the internal Monado runtime to apply changes. Controllers and trackers can be added
+while the runtime is running, including when no devices were present at startup.
+Reconnecting the same serial reuses its OpenXR device.
+The libsurvive global scene solver is enabled by default to establish base
+station calibration when none is saved. `SURVIVE_GLOBALSCENESOLVER=0` explicitly
+disables it. Button input alone does not establish optical tracking; base station
+calibration must complete before usable poses are available. After that, an external
+tool such as motoc aligns Lighthouse space with the headset tracking space.
+
+The libsurvive simple API does not report disconnections. After two seconds without
+pose or button events, WiVRn marks inputs and poses inactive and releases controller
+roles back to the headset. Events resume the device automatically. USB discovery
+and reconnection also depend on the installed libsurvive driver.
+
+Requires `WIVRN_FEATURE_SURVIVE=ON`. WiVRn fetches the LLFA `llfa-main`
+source at the commit recorded in `libsurvive-rev` and builds
+`libwivrn-survive.so`. The Vive transport, playback, global scene solver,
+state-based disambiguator and MPFit poser are embedded in that library; no
+system libsurvive or separately installed plugins are loaded. The shutdown fix
+in `1ddd12c` is included. See [the shutdown investigation](libsurvive-shutdown-handoff.md).
+
+For development, use `-DFETCHCONTENT_SOURCE_DIR_LIBSURVIVE=/path/to/libsurvive`
+to build a local checkout instead of fetching the pinned source. The checkout
+must contain the LLFA APIs used by this Monado adapter.
+
+The environment variable `WIVRN_USE_SURVIVE` also requests this backend.
+If legacy JSON or environment variables request several backends, the priority
+is openhouse, libsurvive, then SteamVR, ignoring backends absent from the build.
+The dashboard saves mutually exclusive `use-steamvr-lh`, `use-survive` and
+`use-openhouse` values. Backend changes require restarting the internal Monado
+runtime. Only the selected backend initializes its USB transport.
+
+## `use-openhouse`
+Default value: `false`
+
+Requires `WIVRN_FEATURE_OPENHOUSE=ON` (enabled by default). Select
+**Advanced options → Lighthouse backend → openhouse** and restart the internal
+Monado runtime. `WIVRN_USE_OPENHOUSE` also requests this backend.
+
+WiVRn fetches the source pinned in `openhouse-rev`, builds
+`libwivrn-openhouse.so`, and directly links its private OpenVR provider factory.
+The Monado host is copied from steamvr_lh *after* applying the complete Monado
+patch series. It has independent symbols and lifecycle, retaining prediction,
+controller roles, hotplug, hands, base station stabilization and tracker standby.
+The SteamVR installation and its original Lighthouse driver are not modified.
+Valve-internal relationship averaging is retained only for steamvr_lh; the
+openhouse host excludes that patch while retaining public metadata exports.
+
+openhouse keeps its room and device settings under `~/.config/lh/`. Align its
+tracking space with the headset using an external calibration tool. Its native
+room shared memory and viewer telemetry remain available. SteamVR is optional
+for the tracking provider itself; the existing Index hand skeleton loader uses
+SteamVR animation resources when available, so full skeletal output still needs
+those resources (or an explicit `LH_HAND_POSES` path).
+
+Recording saves native `input.lhraw` alongside the copied adapter's pose streams
+and a manifest identifying openhouse. The joystick deadzone, reference base
+station, maximum extrapolation and **Turn off all trackers** controls also apply.
+
+For local development, configure
+`-DFETCHCONTENT_SOURCE_DIR_OPENHOUSE=/path/to/openhouse`. For a build with all
+three choices:
+
+```sh
+cmake -S . -B build-server -GNinja \
+    -DWIVRN_FEATURE_STEAMVR_LIGHTHOUSE=ON \
+    -DWIVRN_FEATURE_SURVIVE=ON -DWIVRN_FEATURE_OPENHOUSE=ON
+cmake --build build-server
+```
+
 ## `lh-max-extrapolation`
-Default value: unset
+Default value: `50` ms (also used when unset)
 
-Only available when built with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE`.
+Available with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE`, `WIVRN_FEATURE_SURVIVE` or
+`WIVRN_FEATURE_OPENHOUSE`.
 
-Maximum time in milliseconds that poses may be extrapolated ahead for SteamVR Lighthouse devices.
+Maximum time in milliseconds that poses may be extrapolated ahead for Lighthouse
+devices. All three backends use the same setting and `LH_MAX_EXTRAPOLATION_MS`
+environment variable. `0` disables forward prediction; `-1` removes the time
+limit. In the dashboard, uncheck **Clamp extrapolation for Lighthouse tracked
+devices** to save `-1`. The choice persists when switching backends and takes
+effect after restarting the internal Monado runtime.
+
+The libsurvive adapter applies the limit to controller/tracker poses and emulated
+hand poses. There is no separate fixed 50 ms cap. Its two-second inactivity
+handling for silent/disconnected devices is independent of prediction clamping.
+
+The libsurvive adapter requests raw IMU poses (`--report-in-imu 1`) so that
+positions and velocities refer to the same origin. It stores that reference in
+pose history and predicts it before applying the device-origin transform and
+grip, aim or emulated hand offsets. libsurvive's default output already applies
+the device-origin transform to poses, but reports velocities at the IMU origin;
+predicting those together would use mismatched origins during rotation.
+These offsets follow the predicted orientation, and their linear velocities
+include the tangential velocity at that orientation. This uses the same order as
+steamvr_lh's raw-reference-first prediction.
+
+Emulated Index wrists are placed using steamvr_lh's canonical grip-to-palm
+calibration and the simulated hand's local palm joint. Finger curls do not
+shift the wrist relative to the controller. A mirrored 90 degree roll about
+the local finger direction turns the right wrist clockwise and the left
+counterclockwise, preserving the wrist origin.
+Finger joints still use Monado's hand simulation rather than Valve's skeleton.
 
 ## `lh-stick-deadzone`
 Default value: `0`

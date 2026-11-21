@@ -20,6 +20,7 @@
 #pragma once
 
 #include "app_pacer.h"
+#include "lighthouse_backend.h"
 #include "clock_offset.h"
 #include "compositor/compositor.h"
 #include "inplace_vector.hpp"
@@ -51,6 +52,8 @@ struct ipc_server;
 struct xrt_space_overseer;
 struct xrt_system_compositor;
 union xrt_session_event;
+
+struct survive_system;
 
 namespace wivrn
 {
@@ -86,7 +89,10 @@ class wivrn_session : public xrt_system_devices
 	};
 
 	// Headset roles remain available while Lighthouse controllers are being discovered.
+	lighthouse_backend lighthouse_backend_choice = lighthouse_backend::none;
 	bool lighthouse_enabled = false;
+	bool openhouse_enabled = false;
+	survive_system * survive = nullptr;
 	xrt_system_roles effective_roles = XRT_SYSTEM_ROLES_INIT;
 
 	tracking_control control;

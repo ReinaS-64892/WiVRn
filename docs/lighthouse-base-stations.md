@@ -28,6 +28,30 @@ QuestLHSync の対応ブランチ `monado-base-stations` では、`LHB-` xdev �
 取得した pose は選択した参照空間と現在の Lighthouse origin offset を含むため、
 補正前の配置に戻す際は両方の変換を考慮してください。
 
+## 複数バックエンドでの適用範囲
+
+steamvr_lh と openhouse の両ホストで、ベースステーションの xdev 公開、
+一覧の hotplug 更新、`mnd_root_get_lighthouse_calibration` の公開 API を維持します。
+受信機情報はプロバイダーから届くプロパティを問い合わせるため、未提供のデバイスでは
+`MND_ERROR_INVALID_OPERATION` を返します。推測した受信機シリアルは返しません。
+
+openhouse の BS pose は、runtime が `known && learned` と判定した時点で
+`Running_OK` / 有効として公開します。`learned` は原点の台、位置不確かさ 5 mm 以下、
+または 40 keyframes 以上（もしくはロック済み）で不確かさ 20 mm 以下の台です。
+100 keyframes 以上を必要とする `locked` は追加の配置学習を止める条件であり、
+pose 公開の前提にはしません。以前は `origin || locked` を要求していたため、
+学習済みでも未ロックの台が xdev 一覧には現れる一方、QuestLHSync の有効台数には
+含まれませんでした。未学習の台は引き続き無効とし、接続状態は当該セッションの
+OOTX 受信状態に従います。修正はビルド内の provider コピーに適用し、元の
+openhouse checkout は変更しません。
+`WIVRN_BUILD_TEST=ON` の `lh-openhouse-base-pose-test` は実際の provider の
+`UpdateBase` を呼び、未学習・学習済み未ロック・ロック済み・原点・接続状態の通知を検証します。
+
+`0029-d-steamvr_lh-average-base-station-relationships.patch` による Valve DLL 内部の
+フックと台間関係の平均化は steamvr_lh のみに適用します。設定画面でも SteamVR 選択時だけ
+表示します。openhouse のホストを生成するときは、このパッチだけを一時コピーから除去し、
+追跡処理は openhouse 自身に任せます。共有の Monado ソースや steamvr_lh のフックは変更しません。
+
 以下の診断・安定化機能は、この pose 公開とは独立しています。
 
 この機能は、WiVRn と VIVE Tracker の空間合わせがずれる原因を測定するための実験機能です。

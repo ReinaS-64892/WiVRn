@@ -46,6 +46,9 @@
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 #include "steamvr_lh_interface.h"
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+#include "openhouse_interface.h"
+#endif
 #include "wivrn_ipc.h"
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
@@ -274,12 +277,24 @@ void start_server(configuration config)
 
 		// Snapshot for this runtime only. Dashboard/config OFF overrides inherited env.
 		setenv("LH_STABILIZE_REFERENCE_SERIAL", config.lighthouse_reference_serial.c_str(), true);
-		// Either the dashboard setting or an inherited LH_AVERAGE_RELATIONSHIPS=0
-		// can disable averaging. Enabling in the UI does not override the environment.
-		if (!config.lh_average_relationships)
+		// This controls the Valve provider hook in steamvr_lh only.
+		if (config.selected_lighthouse_backend() == wivrn::lighthouse_backend::steamvr && !config.lh_average_relationships)
 			setenv("LH_AVERAGE_RELATIONSHIPS", "0", true);
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 		steamvr_lh_set_reference_callback([](const char * serial) {
+			try
+			{
+				if (serial && wivrn::valid_lighthouse_serial(serial))
+					send_to_main(from_monado::lighthouse_reference{serial});
+			}
+			catch (const std::exception & e)
+			{
+				std::cerr << "Cannot report Lighthouse base station: " << e.what() << '\n';
+			}
+		});
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+		openhouse_set_reference_callback([](const char * serial) {
 			try
 			{
 				if (serial && wivrn::valid_lighthouse_serial(serial))

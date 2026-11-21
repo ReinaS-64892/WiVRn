@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenAI Codex <codex@openai.com>
+Date: Tue, 10 Nov 2026 16:00:00 +0900
+Subject: [PATCH] survive: accept a bundled runtime target without pkg-config
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -206,7 +206,13 @@
+ 
+ if(XRT_HAVE_LINUX OR MINGW)
+ 	pkg_check_modules(GST gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
+-	pkg_check_modules(SURVIVE IMPORTED_TARGET survive)
++	if(TARGET wivrn-survive)
++		set(SURVIVE_FOUND TRUE)
++		set(SURVIVE_TARGET wivrn-survive)
++	else()
++		pkg_check_modules(SURVIVE IMPORTED_TARGET survive)
++		set(SURVIVE_TARGET PkgConfig::SURVIVE)
++	endif()
+ endif()
+ 
+ # Find openvr library
+--- a/src/xrt/drivers/CMakeLists.txt
++++ b/src/xrt/drivers/CMakeLists.txt
+@@ -496,16 +496,22 @@
+ 			aux_vive
+ 			drv_includes
+ 			drv_vp2
+-			PkgConfig::SURVIVE
++			${SURVIVE_TARGET}
+             nlohmann_json::nlohmann_json ZLIB::ZLIB ${CMAKE_DL_LIBS}
+ 		)
+ 
+-	cmake_push_check_state(RESET)
+-	set(CMAKE_REQUIRED_LIBRARIES PkgConfig::SURVIVE)
+-	check_symbol_exists(
+-		"survive_simple_object_charge_percet" "survive_api.h" HAVE_MISSPELLED_CHARGE_FN
+-		)
+-	cmake_pop_check_state()
++	if(TARGET wivrn-survive)
++		# The pinned LLFA API uses the corrected spelling, regardless of a
++		# symbol check cached by an earlier system-libsurvive build.
++		set(HAVE_MISSPELLED_CHARGE_FN FALSE)
++	else()
++		cmake_push_check_state(RESET)
++		set(CMAKE_REQUIRED_LIBRARIES ${SURVIVE_TARGET})
++		check_symbol_exists(
++			"survive_simple_object_charge_percet" "survive_api.h" HAVE_MISSPELLED_CHARGE_FN
++			)
++		cmake_pop_check_state()
++	endif()
+ 	if(HAVE_MISSPELLED_CHARGE_FN)
+ 		target_compile_definitions(drv_survive PUBLIC XR_SURVIVE_MISSPELLED_CHARGE_FN)
+ 	endif()
