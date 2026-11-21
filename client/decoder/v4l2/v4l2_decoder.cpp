@@ -578,17 +578,41 @@ void decoder::setup_ycbcr_sampler()
 	ycbcr_sampler = nullptr;
 	ycbcr_conversion = nullptr;
 
+	// Query this imported image's DRM modifier, not optimal-tiling features.
+	auto properties = physical_device.getFormatProperties2<vk::FormatProperties2, vk::DrmFormatModifierPropertiesListEXT>(capture_vk_format);
+	auto & modifier_list = properties.get<vk::DrmFormatModifierPropertiesListEXT>();
+	std::vector<vk::DrmFormatModifierPropertiesEXT> modifiers(modifier_list.drmFormatModifierCount);
+	modifier_list.pDrmFormatModifierProperties = modifiers.data();
+	// Older Vulkan-Hpp RAII wrappers lack the output-pointer overload. Use the
+	// same instance dispatcher directly to preserve the caller-owned pNext chain.
+	physical_device.getDispatcher()->vkGetPhysicalDeviceFormatProperties2(
+	        static_cast<VkPhysicalDevice>(*physical_device),
+	        static_cast<VkFormat>(capture_vk_format),
+	        reinterpret_cast<VkFormatProperties2 *>(&properties.get<vk::FormatProperties2>()));
+
+	const auto linear_features = vk::FormatFeatureFlagBits::eSampledImageFilterLinear |
+	                             vk::FormatFeatureFlagBits::eSampledImageYcbcrConversionLinearFilter;
+	sampling_filter = vk::Filter::eNearest;
+	for (const auto & modifier: modifiers)
+		if (modifier.drmFormatModifier == drm_format_mod_linear &&
+		    (modifier.drmFormatModifierTilingFeatures & linear_features) == linear_features)
+			sampling_filter = vk::Filter::eLinear;
+	spdlog::info("V4L2 {} filtering: {}", vk::to_string(capture_vk_format),
+	             sampling_filter == vk::Filter::eLinear ? "linear sampler" : "shader bilinear (nearest-only sampler)");
+
+	// Keep luma and chroma filters equal, including on devices without separate
+	// reconstruction filters. Nearest-only formats are interpolated in the shader.
 	ycbcr_conversion = vk::raii::SamplerYcbcrConversion(device, {
 	                                                                    .format = capture_vk_format,
 	                                                                    .ycbcrModel = vk::SamplerYcbcrModelConversion::eYcbcr709,
 	                                                                    .ycbcrRange = vk::SamplerYcbcrRange::eItuFull,
-	                                                                    .chromaFilter = vk::Filter::eNearest,
+	                                                                    .chromaFilter = sampling_filter,
 	                                                            });
 
 	vk::StructureChain sampler_info{
 	        vk::SamplerCreateInfo{
-	                .magFilter = vk::Filter::eNearest,
-	                .minFilter = vk::Filter::eNearest,
+	                .magFilter = sampling_filter,
+	                .minFilter = sampling_filter,
 	                .mipmapMode = vk::SamplerMipmapMode::eNearest,
 	                .addressModeU = vk::SamplerAddressMode::eClampToEdge,
 	                .addressModeV = vk::SamplerAddressMode::eClampToEdge,

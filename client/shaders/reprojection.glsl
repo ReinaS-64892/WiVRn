@@ -24,6 +24,8 @@ layout(push_constant) uniform pc
 	ivec4 a_rect;
 	vec4 scale;
 	vec4 bias;
+	// Active encoded width/height, excluding decoder padding.
+	ivec4 encoded_size;
 };
 
 #ifdef VERT_SHADER
@@ -46,6 +48,8 @@ void main()
 
 layout(constant_id = 0) const int alpha = 1;
 layout(constant_id = 1) const bool do_srgb = false;
+layout(constant_id = 2) const bool manual_rgb = false;
+layout(constant_id = 3) const bool manual_a = false;
 
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 
@@ -69,24 +73,39 @@ vec4 sRGB_to_linear_rgba(vec4 x)
 	        x.a);
 }
 
+// Use sample instructions rather than texelFetch: decoded YCbCr images require
+// their immutable conversion sampler. Interpolate the converted RGB values when
+// the decoder uses nearest filtering, without requiring YCbCr linear support.
+vec4 sample_linear(sampler2D image, vec2 uv, vec2 size, vec2 first, vec2 last, bool manual_linear)
+{
+	vec2 p = clamp(uv * size - 0.5, first, last);
+	if (!manual_linear)
+		return textureLod(image, (p + 0.5) / size, 0.0);
+
+	vec2 base = floor(p);
+	vec2 f = fract(p);
+	vec2 lo = (max(base, first) + 0.5) / size;
+	vec2 hi = (min(base + 1.0, last) + 0.5) / size;
+	return mix(
+		mix(textureLod(image, lo, 0.0), textureLod(image, vec2(hi.x, lo.y), 0.0), f.x),
+		mix(textureLod(image, vec2(lo.x, hi.y), 0.0), textureLod(image, hi, 0.0), f.x), f.y);
+}
+
 void main()
 {
+	vec2 first = vec2(rgb_rect.xy);
+	outColor = sample_linear(rgb[0], inUV.xy, vec2(rgb_rect.zw), first, first + vec2(encoded_size.xy) - 1.0, manual_rgb);
 	if (alpha == 1)
 	{
-		// Avoid sampling between the eyes
-		vec2 a = inUV.zw;
-		float d = a.x - 0.5;
-		if (abs(d) *a_rect.z < 1)
-			a.x += (d > 0 ? 1 : -1)  / float(a_rect.z);
-		outColor = vec4(texture(rgb[0], inUV.xy).rgb, texture(rgb[1], a).r);
+		// Alpha is half resolution, with both eyes packed side by side.
+		// Clamp to this eye's active texels, excluding decoder padding.
+		vec2 a_first = vec2(a_rect.xy) * 0.5;
+		outColor.a = sample_linear(rgb[1], inUV.zw, vec2(a_rect.zw) * 0.5,
+		                           a_first, a_first + vec2(encoded_size.xy) * 0.5 - 1.0, manual_a).r;
 	}
-	else
-		outColor = texture(rgb[0], inUV.xy).rgba;
 
 	if (do_srgb)
-	{
 		outColor = sRGB_to_linear_rgba(outColor);
-	}
 
 	if (alpha == 0)
 	{

@@ -1016,6 +1016,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			                .extent = blit_handle->extent,
 			        },
 			        .layout_rgb = blit_handle->current_layout,
+			        .manual_rgb = decoders[i].decoder->needs_manual_linear_filtering(),
 			};
 		}
 		else
@@ -1036,6 +1037,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				        },
 				};
 				images[j].layout_a = blit_handle->current_layout;
+				images[j].manual_a = decoders[i].decoder->needs_manual_linear_filtering();
 			}
 		}
 	}
