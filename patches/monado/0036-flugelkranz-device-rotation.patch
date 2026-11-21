@@ -1,0 +1,629 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] libmonado: add private FlugelKranz tracker rotation batches
+
+Refresh device-index snapshots and atomically commit STAGE with root-axis,
+orientation-only tracker corrections. Keep driver poses and positions raw,
+clear corrections on owner disconnect and device removal, and validate
+complete batches before changing state. Cover composition, inverse/batched
+queries, validation and cleanup with native regression tests.
+---
+diff --git a/src/xrt/base/b_space_overseer.c b/src/xrt/base/b_space_overseer.c
+index 310b74e2f..076159d75 100644
+--- a/src/xrt/base/b_space_overseer.c
++++ b/src/xrt/base/b_space_overseer.c
+@@ -108,6 +108,14 @@ struct b_space_overseer
+ {
+ 	struct xrt_space_overseer base;
+ 
++	const void *flugelkranz_owner;
++	uint32_t flugelkranz_count;
++	struct
++	{
++		struct xrt_device *device;
++		struct xrt_quat rotation;
++	} flugelkranz[32];
++
+ 	//! Main graph lock.
+ 	pthread_rwlock_t lock;
+ 
+@@ -384,6 +392,44 @@ hashmap_unreference_tracked_device_items(void *item, void *priv)
+  * from a leaf space to a the root space, relations are pushed in the same
+  * order.
+  */
++static void
++push_then_traverse(struct xrt_relation_chain *xrc, struct u_space *space, int64_t at_timestamp_ns);
++
++/* Caller holds the graph lock. Drivers and raw device IPC remain unmodified.
++ * Convert a root-axis orientation correction into the pose's parent axes.
++ * Left multiplication preserves physical ankle rotation; position is untouched. */
++static void
++flugelkranz_correct(struct u_space *space, int64_t time, struct xrt_space_relation *relation)
++{
++	struct b_space_overseer *uso = space->pose.overseer;
++	if (uso == NULL || !(relation->relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT))
++		return;
++	for (uint32_t i = 0; i < uso->flugelkranz_count; i++) {
++		if (uso->flugelkranz[i].device != space->pose.xdev)
++			continue;
++		struct xrt_relation_chain chain = {0};
++		push_then_traverse(&chain, space->next, time);
++		struct xrt_space_relation parent;
++		if (chain.step_count == 0) {
++			parent = (struct xrt_space_relation)XRT_SPACE_RELATION_ZERO;
++			parent.pose.orientation.w = 1;
++		} else {
++			m_relation_chain_resolve(&chain, &parent);
++			if (!(parent.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT))
++				return;
++		}
++		struct xrt_quat inverse, local, temp;
++		math_quat_invert(&parent.pose.orientation, &inverse);
++		math_quat_rotate(&inverse, &uso->flugelkranz[i].rotation, &temp);
++		math_quat_rotate(&temp, &parent.pose.orientation, &local);
++		math_quat_rotate(&local, &relation->pose.orientation, &temp);
++		relation->pose.orientation = temp;
++		/* The caller supplies sampled corrections, without their derivative. */
++		relation->relation_flags &= ~XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
++		return;
++	}
++}
++
+ static void
+ push_then_traverse(struct xrt_relation_chain *xrc, struct u_space *space, int64_t at_timestamp_ns)
+ {
+@@ -398,6 +444,7 @@ push_then_traverse(struct xrt_relation_chain *xrc, struct u_space *space, int64_
+ 
+ 		struct xrt_space_relation xsr;
+ 		xrt_device_get_tracked_pose(space->pose.xdev, space->pose.xname, at_timestamp_ns, &xsr);
++		flugelkranz_correct(space, at_timestamp_ns, &xsr);
+ 		m_relation_chain_push_relation(xrc, &xsr);
+ 	} break;
+ 	case U_SPACE_TYPE_OFFSET: m_relation_chain_push_pose_if_not_identity(xrc, &space->offset.pose); break;
+@@ -443,6 +490,7 @@ traverse_then_push_inverse(struct xrt_relation_chain *xrc, struct u_space *space
+ 
+ 		struct xrt_space_relation xsr;
+ 		xrt_device_get_tracked_pose(space->pose.xdev, space->pose.xname, at_timestamp_ns, &xsr);
++		flugelkranz_correct(space, at_timestamp_ns, &xsr);
+ 		m_relation_chain_push_inverted_relation(xrc, &xsr);
+ 	} break;
+ 	case U_SPACE_TYPE_ZOMBIE: assert(false); break; // Handled above.
+@@ -1161,9 +1209,9 @@ unlock:
+ }
+ 
+ static xrt_result_t
+-set_reference_space_offset(struct xrt_space_overseer *xso,
+-                           enum xrt_reference_space_type type,
+-                           const struct xrt_pose *offset)
++set_reference_space_offset_locked(struct xrt_space_overseer *xso,
++                                  enum xrt_reference_space_type type,
++                                  const struct xrt_pose *offset)
+ {
+ 	if (type == XRT_SPACE_REFERENCE_TYPE_LOCAL_FLOOR) {
+ 		// LOCAL_FLOOR is calculated from LOCAL and STAGE
+@@ -1178,7 +1226,6 @@ set_reference_space_offset(struct xrt_space_overseer *xso,
+ 
+ 	xrt_result_t xret = XRT_SUCCESS;
+ 
+-	pthread_rwlock_wrlock(&uso->lock);
+ 
+ 	struct u_space *us = get_semantic_space(uso, type);
+ 	if (!space_is_offset_compatible(us)) {
+@@ -1235,10 +1282,81 @@ set_reference_space_offset(struct xrt_space_overseer *xso,
+ 	}
+ 
+ unlock:
+-	pthread_rwlock_unlock(&uso->lock);
+ 	return xret;
+ }
+ 
++static xrt_result_t
++set_reference_space_offset(struct xrt_space_overseer *xso,
++                           enum xrt_reference_space_type type,
++                           const struct xrt_pose *offset)
++{
++	struct b_space_overseer *uso = b_space_overseer(xso);
++	pthread_rwlock_wrlock(&uso->lock);
++	xrt_result_t ret = set_reference_space_offset_locked(xso, type, offset);
++	pthread_rwlock_unlock(&uso->lock);
++	return ret;
++}
++
++static xrt_result_t
++flugelkranz_apply(struct xrt_space_overseer *xso,
++                  const void *owner,
++                  const struct xrt_pose *stage,
++                  uint32_t count,
++                  struct xrt_device *const *devices,
++                  const struct xrt_quat *rotations)
++{
++	struct b_space_overseer *uso = b_space_overseer(xso);
++	if (count > ARRAY_SIZE(uso->flugelkranz))
++		return XRT_ERROR_INPUT_UNSUPPORTED;
++	pthread_rwlock_wrlock(&uso->lock);
++	xrt_result_t ret = XRT_SUCCESS;
++	if (uso->flugelkranz_owner != NULL && uso->flugelkranz_owner != owner) {
++		ret = stage == NULL ? XRT_SUCCESS : XRT_ERROR_INPUT_UNSUPPORTED;
++		goto out;
++	}
++	for (uint32_t i = 0; i < count; i++) {
++		if (devices[i]->device_type != XRT_DEVICE_TYPE_GENERIC_TRACKER ||
++		    find_xdev_tracked_device_read_locked(uso, devices[i]) == NULL ||
++		    !math_quat_validate_within_1_percent(&rotations[i])) {
++			ret = XRT_ERROR_INPUT_UNSUPPORTED;
++			goto out;
++		}
++		for (uint32_t j = 0; j < i; j++) {
++			if (devices[i] == devices[j]) {
++				ret = XRT_ERROR_INPUT_UNSUPPORTED;
++				goto out;
++			}
++		}
++	}
++	if (stage != NULL) {
++		if (!math_vec3_validate(&stage->position) ||
++		    !math_quat_validate_within_1_percent(&stage->orientation)) {
++			ret = XRT_ERROR_INPUT_UNSUPPORTED;
++			goto out;
++		}
++		if (uso->can_do_local_spaces_recenter ||
++		    !space_is_offset_compatible(get_semantic_space(uso, XRT_SPACE_REFERENCE_TYPE_STAGE)) ||
++		    !space_is_offset_compatible(u_space(xso->semantic.local_floor))) {
++			ret = XRT_ERROR_UNSUPPORTED_SPACE_TYPE;
++			goto out;
++		}
++		struct xrt_pose normalized_stage = *stage;
++		math_quat_normalize(&normalized_stage.orientation);
++		/* Notification failure cannot roll back a committed space update. */
++		set_reference_space_offset_locked(xso, XRT_SPACE_REFERENCE_TYPE_STAGE, &normalized_stage);
++	}
++	uso->flugelkranz_owner = count > 0 ? owner : NULL;
++	uso->flugelkranz_count = count;
++	for (uint32_t i = 0; i < count; i++) {
++		uso->flugelkranz[i].device = devices[i];
++		uso->flugelkranz[i].rotation = rotations[i];
++		math_quat_normalize(&uso->flugelkranz[i].rotation);
++	}
++out:
++	pthread_rwlock_unlock(&uso->lock);
++	return ret;
++}
++
+ static xrt_result_t
+ add_device(struct xrt_space_overseer *xso, struct xrt_device *xdev)
+ {
+@@ -1253,6 +1371,13 @@ remove_device(struct xrt_space_overseer *xso, struct xrt_device *xdev)
+ 	struct b_space_overseer *uso = b_space_overseer(xso);
+ 
+ 	pthread_rwlock_wrlock(&uso->lock);
++	for (uint32_t i = 0; i < uso->flugelkranz_count;) {
++		if (uso->flugelkranz[i].device == xdev) {
++			uso->flugelkranz[i] = uso->flugelkranz[--uso->flugelkranz_count];
++		} else {
++			i++;
++		}
++	}
+ 
+ 	struct b_tracked_device *btd = find_xdev_tracked_device_read_locked(uso, xdev);
+ 	if (btd != NULL) {
+@@ -1379,6 +1504,7 @@ b_space_overseer_create(struct xrt_session_event_sink *broadcast)
+ 	uso->base.set_reference_space_offset = set_reference_space_offset;
+ 	uso->base.add_device = add_device;
+ 	uso->base.remove_device = remove_device;
++	uso->base.flugelkranz_apply = flugelkranz_apply;
+ 	uso->base.attach_device = attach_device;
+ 	uso->base.destroy = destroy;
+ 	uso->broadcast = broadcast;
+diff --git a/src/xrt/include/xrt/xrt_space.h b/src/xrt/include/xrt/xrt_space.h
+index fd6b46bea..e00552364 100644
+--- a/src/xrt/include/xrt/xrt_space.h
++++ b/src/xrt/include/xrt/xrt_space.h
+@@ -382,6 +382,16 @@ struct xrt_space_overseer
+ 	 *
+ 	 * @param xso The space overseer.
+ 	 */
++	/* Private WiVRn/FlugelKranz extension. Complete replacement, in root axes.
++	 * A non-NULL stage is committed atomically with the orientation corrections.
++	 * NULL stage/count zero releases corrections owned by this IPC connection. */
++	xrt_result_t (*flugelkranz_apply)(struct xrt_space_overseer *xso,
++	                                  const void *owner,
++	                                  const struct xrt_pose *stage,
++	                                  uint32_t count,
++	                                  struct xrt_device *const *devices,
++	                                  const struct xrt_quat *rotations);
++
+ 	void (*destroy)(struct xrt_space_overseer *xs);
+ };
+ 
+diff --git a/src/xrt/ipc/server/ipc_server_handler.c b/src/xrt/ipc/server/ipc_server_handler.c
+index 9f298ce00..dcb61d3d3 100644
+--- a/src/xrt/ipc/server/ipc_server_handler.c
++++ b/src/xrt/ipc/server/ipc_server_handler.c
+@@ -2874,3 +2874,19 @@ ipc_handle_future_destroy(volatile struct ipc_client_state *ics, uint32_t future
+ {
+ 	return release_future(ics, future_id);
+ }
++
++/* The libmonado snapshot's indices have already been translated to IPC IDs. */
++xrt_result_t
++ipc_handle_space_flugelkranz_apply(volatile struct ipc_client_state *ics,
++                                   const struct xrt_pose *stage,
++                                   const struct ipc_flugelkranz_update *update)
++{
++	struct xrt_space_overseer *xso = ics->server->xso;
++	if (xso->flugelkranz_apply == NULL || update->count > IPC_FLUGELKRANZ_MAX_DEVICES)
++		return XRT_ERROR_INPUT_UNSUPPORTED;
++	struct xrt_device *devices[IPC_FLUGELKRANZ_MAX_DEVICES];
++	for (uint32_t i = 0; i < update->count; i++) {
++		GET_XDEV_OR_RETURN(ics, update->device_ids[i], devices[i]);
++	}
++	return xso->flugelkranz_apply(xso, (const void *)ics, stage, update->count, devices, update->rotations);
++}
+diff --git a/src/xrt/ipc/server/ipc_server_per_client_thread.c b/src/xrt/ipc/server/ipc_server_per_client_thread.c
+index a322e61d8..256b466c5 100644
+--- a/src/xrt/ipc/server/ipc_server_per_client_thread.c
++++ b/src/xrt/ipc/server/ipc_server_per_client_thread.c
+@@ -120,6 +120,11 @@ common_shutdown(volatile struct ipc_client_state *ics)
+ 	 * Clean up various resources.
+ 	 */
+ 
++	/* Also clear when the owner crashes or closes its IPC socket. */
++	if (ics->server->xso != NULL && ics->server->xso->flugelkranz_apply != NULL) {
++		ics->server->xso->flugelkranz_apply(ics->server->xso, (const void *)ics, NULL, 0, NULL, NULL);
++	}
++
+ 	// If the session hasn't been stopped, destroy the compositor.
+ 	ipc_server_client_destroy_session_and_compositor(ics);
+ 
+diff --git a/src/xrt/ipc/shared/ipc_protocol.h b/src/xrt/ipc/shared/ipc_protocol.h
+index 875da26af..ea00907e9 100644
+--- a/src/xrt/ipc/shared/ipc_protocol.h
++++ b/src/xrt/ipc/shared/ipc_protocol.h
+@@ -31,6 +31,15 @@
+ #include <sys/types.h>
+ 
+ 
++/* Private extension: bounded to fit a single IPC message. */
++#define IPC_FLUGELKRANZ_MAX_DEVICES 32
++struct ipc_flugelkranz_update
++{
++	uint32_t count;
++	uint32_t device_ids[IPC_FLUGELKRANZ_MAX_DEVICES];
++	struct xrt_quat rotations[IPC_FLUGELKRANZ_MAX_DEVICES];
++};
++
+ #define IPC_CRED_SIZE 1    // auth not implemented
+ #define IPC_BUF_SIZE 2048  // must be >= largest message length in bytes
+ #define IPC_MAX_VIEWS 8    // max views we will return configs for
+diff --git a/src/xrt/ipc/shared/proto/50-space.json b/src/xrt/ipc/shared/proto/50-space.json
+index 9315b3cdc..641c208a4 100644
+--- a/src/xrt/ipc/shared/proto/50-space.json
++++ b/src/xrt/ipc/shared/proto/50-space.json
+@@ -118,5 +118,12 @@
+ 			{"name": "type", "type": "enum xrt_reference_space_type"},
+ 			{"name": "offset", "type": "struct xrt_pose"}
+ 		]
+-	}
++	},
++
++    "space_flugelkranz_apply": {
++        "in": [
++            {"name": "stage", "type": "struct xrt_pose"},
++            {"name": "update", "type": "struct ipc_flugelkranz_update"}
++        ]
++    }
+ }
+diff --git a/src/xrt/targets/libmonado/libmonado.def b/src/xrt/targets/libmonado/libmonado.def
+index ead918fd2..3f5e2b19d 100644
+--- a/src/xrt/targets/libmonado/libmonado.def
++++ b/src/xrt/targets/libmonado/libmonado.def
+@@ -26,3 +26,6 @@ EXPORTS
+     mnd_root_get_device_brightness
+     mnd_root_set_device_brightness
+     mnd_root_comp_set_chroma_key_params
++
++    mnd_root_flugelkranz_refresh_devices
++    mnd_root_flugelkranz_apply
+diff --git a/src/xrt/targets/libmonado/monado.c b/src/xrt/targets/libmonado/monado.c
+index 7d36e9556..edf820939 100644
+--- a/src/xrt/targets/libmonado/monado.c
++++ b/src/xrt/targets/libmonado/monado.c
+@@ -977,3 +977,42 @@ mnd_root_set_chroma_key_params(
+ 	default: PE("Internal error, shouldn't get here"); return MND_ERROR_OPERATION_FAILED;
+ 	}
+ }
++
++
++mnd_result_t
++mnd_root_flugelkranz_refresh_devices(mnd_root_t *root)
++{
++	CHECK_NOT_NULL(root);
++	/* Publish a complete snapshot only after every info query succeeds. */
++	struct ipc_device_list previous_list = root->device_list;
++	struct ipc_device_info previous_infos[XRT_SYSTEM_MAX_DEVICES];
++	memcpy(previous_infos, root->device_infos, sizeof(previous_infos));
++	mnd_result_t ret = update_device_list_and_infos(root);
++	if (ret != MND_SUCCESS) {
++		root->device_list = previous_list;
++		memcpy(root->device_infos, previous_infos, sizeof(previous_infos));
++	}
++	return ret;
++}
++
++mnd_result_t
++mnd_root_flugelkranz_apply(mnd_root_t *root,
++                           const mnd_pose_t *stage_offset,
++                           uint32_t count,
++                           const mnd_flugelkranz_device_rotation_t *rotations)
++{
++	CHECK_NOT_NULL(root);
++	CHECK_NOT_NULL(stage_offset);
++	if (count > MND_FLUGELKRANZ_MAX_DEVICES || (count > 0 && rotations == NULL))
++		return MND_ERROR_INVALID_VALUE;
++	struct ipc_flugelkranz_update update = {0};
++	update.count = count;
++	for (uint32_t i = 0; i < count; i++) {
++		CHECK_DEVICE_INDEX(rotations[i].device_index);
++		update.device_ids[i] = root->device_list.devices[rotations[i].device_index].id;
++		memcpy(&update.rotations[i], &rotations[i].orientation, sizeof(struct xrt_quat));
++	}
++	xrt_result_t ret =
++	    ipc_call_space_flugelkranz_apply(&root->ipc_c, (const struct xrt_pose *)stage_offset, &update);
++	return ret == XRT_SUCCESS ? MND_SUCCESS : MND_ERROR_OPERATION_FAILED;
++}
+diff --git a/src/xrt/targets/libmonado/monado.h b/src/xrt/targets/libmonado/monado.h
+index 7cd8b45e9..6deb0a5e1 100644
+--- a/src/xrt/targets/libmonado/monado.h
++++ b/src/xrt/targets/libmonado/monado.h
+@@ -643,6 +643,39 @@ mnd_root_get_reference_space_offset(mnd_root_t *root, mnd_reference_space_type_t
+ mnd_result_t
+ mnd_root_set_reference_space_offset(mnd_root_t *root, mnd_reference_space_type_t type, const mnd_pose_t *offset);
+ 
++/* Private WiVRn extension, version 1. Does not change the upstream ABI version.
++ * Refresh invalidates all previously obtained device indices and property strings.
++ * Re-enumerate and match serials after refreshing; never persist indices. */
++mnd_result_t
++mnd_root_flugelkranz_refresh_devices(mnd_root_t *root);
++
++#define MND_FLUGELKRANZ_MAX_DEVICES 32
++typedef struct mnd_flugelkranz_device_rotation
++{
++	uint32_t device_index;
++	struct
++	{
++		float x, y, z, w;
++	} orientation;
++} mnd_flugelkranz_device_rotation_t;
++
++/* Atomically replace STAGE and the complete set of tracker orientation offsets.
++ * Each quaternion is a unit rotation in Monado ROOT axes, left-multiplied onto
++ * the tracked orientation about that device's position (no position offset).
++ * Physical orientation changes remain visible. Omitted devices are cleared.
++ * Count zero clears all corrections. Corrections are also cleared on disconnect
++ * and device removal. Only one IPC connection may own a nonempty set at a time.
++ * Raw device poses are unchanged; space queries see corrected orientations.
++ * Angular velocity is marked invalid while corrected (no derivative supplied).
++ * Inputs must be finite, normalized, unique and refer to generic trackers.
++ * This is a sampled update, just like set_reference_space_offset. */
++mnd_result_t
++mnd_root_flugelkranz_apply(mnd_root_t *root,
++                           const mnd_pose_t *stage_offset,
++                           uint32_t count,
++                           const mnd_flugelkranz_device_rotation_t *rotations);
++
++
+ /*!
+  * Read the current offset of a tracking origin.
+  *
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 7e8b576c7..c1246b3a1 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -24,6 +24,7 @@ set(tests
+     tests_vector
+     tests_worker
+     tests_pose
++    tests_flugelkranz_rotation
+     tests_vec3_angle
+ 	)
+ if(XRT_HAVE_D3D11)
+@@ -192,3 +193,5 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
+ 	target_link_libraries(tests_steamvr_lh_stabilization PRIVATE drv_steamvr_lh aux_math aux_vive xrt-external-openvr)
+ 	add_test(NAME steamvr_lh_stabilization COMMAND tests_steamvr_lh_stabilization)
+ endif()
++
++target_link_libraries(tests_flugelkranz_rotation PRIVATE base aux_math)
+diff --git a/tests/tests_flugelkranz_rotation.cpp b/tests/tests_flugelkranz_rotation.cpp
+new file mode 100644
+index 000000000..03c0726a8
+--- /dev/null
++++ b/tests/tests_flugelkranz_rotation.cpp
+@@ -0,0 +1,189 @@
++// Copyright 2026, OpenAI.
++// SPDX-License-Identifier: BSL-1.0
++#include "catch_amalgamated.hpp"
++#include "b_space_overseer.h"
++#include "xrt/xrt_device.h"
++#include "xrt/xrt_session.h"
++#include "xrt/xrt_tracking.h"
++#include "math/m_api.h"
++#include <cmath>
++#include <limits>
++
++namespace {
++xrt_quat
++turn(float x, float y, float z, float angle)
++{
++	xrt_vec3 axis{x, y, z};
++	xrt_quat q;
++	math_quat_from_angle_vector(angle, &axis, &q);
++	return q;
++}
++xrt_quat
++mul(xrt_quat a, xrt_quat b)
++{
++	xrt_quat q;
++	math_quat_rotate(&a, &b, &q);
++	return q;
++}
++void
++near(xrt_quat a, xrt_quat b)
++{
++	float dot = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
++	CHECK(std::abs(dot) == Catch::Approx(1).margin(0.00001));
++}
++struct Device : xrt_device
++{
++	xrt_tracking_origin origin{};
++	xrt_space_relation relation = XRT_SPACE_RELATION_ZERO;
++	Device(uint64_t number, xrt_quat calibration) : xrt_device{}
++	{
++		id.val = number;
++		device_type = XRT_DEVICE_TYPE_GENERIC_TRACKER;
++		origin.initial_offset = {calibration, {2, 1, -3}};
++		origin.type = XRT_TRACKING_TYPE_OTHER;
++		tracking_origin = &origin;
++		relation.pose = {turn(1, 0, 0, .3f), {.2f, .1f, .4f}};
++		relation.relation_flags = (xrt_space_relation_flags)(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
++		                                                     XRT_SPACE_RELATION_POSITION_VALID_BIT |
++		                                                     XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
++		                                                     XRT_SPACE_RELATION_POSITION_TRACKED_BIT |
++		                                                     XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT);
++		get_tracked_pose = [](xrt_device *d, xrt_input_name, int64_t, xrt_space_relation *out) {
++			*out = static_cast<Device *>(d)->relation;
++			return XRT_SUCCESS;
++		};
++	}
++};
++struct World
++{
++	Device toe{1, turn(0, 0, 1, .7f)}, other{2, turn(0, 0, 1, .7f)};
++	xrt_session_event_sink sink{};
++	b_space_overseer *b;
++	xrt_space_overseer *xso;
++	xrt_space *pose = nullptr;
++	xrt_pose identity = XRT_POSE_IDENTITY;
++	World()
++	{
++		sink.push_event = [](xrt_session_event_sink *, const xrt_session_event *) { return XRT_SUCCESS; };
++		b = b_space_overseer_create(&sink);
++		xso = reinterpret_cast<xrt_space_overseer *>(b);
++		xrt_device *devices[]{&toe, &other};
++		b_space_overseer_legacy_setup(b, devices, 2, nullptr, &identity, false, false);
++		REQUIRE(b_space_overseer_create_pose_space(b, &toe, XRT_INPUT_GENERIC_TRACKER_POSE, &pose) ==
++		        XRT_SUCCESS);
++	}
++	~World()
++	{
++		xrt_space_reference(&pose, nullptr);
++		xrt_space_overseer_destroy(&xso);
++	}
++	xrt_space_relation
++	locate(xrt_space *base = nullptr)
++	{
++		xrt_space_relation result{};
++		REQUIRE(xrt_space_overseer_locate_space(xso, base ? base : xso->semantic.stage, &identity, 100, pose,
++		                                        &identity, &result) == XRT_SUCCESS);
++		return result;
++	}
++	xrt_result_t
++	apply(const void *owner, xrt_quat q, xrt_pose stage = XRT_POSE_IDENTITY)
++	{
++		xrt_device *devices[]{&toe};
++		return xso->flugelkranz_apply(xso, owner, &stage, 1, devices, &q);
++	}
++};
++} // namespace
++TEST_CASE("FlugelKranz orientation offsets preserve position and physical ankle motion", "[flugelkranz]")
++{
++	World w;
++	const auto before = w.locate();
++	auto yaw = turn(0, 1, 0, .6f);
++	REQUIRE(w.apply(&w, yaw) == XRT_SUCCESS);
++	auto after = w.locate();
++	near(after.pose.orientation, mul(yaw, before.pose.orientation));
++	CHECK(after.pose.position.x == Catch::Approx(before.pose.position.x));
++	CHECK(after.pose.position.y == Catch::Approx(before.pose.position.y));
++	CHECK(after.pose.position.z == Catch::Approx(before.pose.position.z));
++	CHECK((after.relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT) == 0);
++	// Physical ankle changes survive the root-axis correction under a tilted tracking origin.
++	w.toe.relation.pose.orientation = turn(1, 0, 0, .8f);
++	near(w.locate().pose.orientation,
++	     mul(yaw, mul(w.toe.origin.initial_offset.orientation, w.toe.relation.pose.orientation)));
++	// Raw driver poses remain available and unmodified.
++	xrt_space_relation raw{};
++	xrt_device_get_tracked_pose(&w.toe, XRT_INPUT_GENERIC_TRACKER_POSE, 100, &raw);
++	near(raw.pose.orientation, w.toe.relation.pose.orientation);
++	// Other devices are not affected.
++	xrt_space *other = nullptr;
++	REQUIRE(b_space_overseer_create_pose_space(w.b, &w.other, XRT_INPUT_GENERIC_TRACKER_POSE, &other) ==
++	        XRT_SUCCESS);
++	REQUIRE(xrt_space_overseer_locate_space(w.xso, w.xso->semantic.root, &w.identity, 100, other, &w.identity,
++	                                        &raw) == XRT_SUCCESS);
++	near(raw.pose.orientation, mul(w.other.origin.initial_offset.orientation, w.other.relation.pose.orientation));
++	xrt_space_reference(&other, nullptr);
++}
++TEST_CASE("FlugelKranz batch stage update and inverse and multi-space queries agree", "[flugelkranz]")
++{
++	World w;
++	auto before = w.locate();
++	xrt_pose stage{turn(0, 1, 0, .4f), {1, 0, 2}};
++	REQUIRE(w.apply(&w, stage.orientation, stage) == XRT_SUCCESS);
++	near(w.locate().pose.orientation, before.pose.orientation); // STAGE inverse cancels correction.
++	xrt_space_relation inverse{};
++	REQUIRE(xrt_space_overseer_locate_space(w.xso, w.pose, &w.identity, 100, w.xso->semantic.stage, &w.identity,
++	                                        &inverse) == XRT_SUCCESS);
++	xrt_quat expected;
++	math_quat_invert(&before.pose.orientation, &expected);
++	near(inverse.pose.orientation, expected);
++	xrt_space *spaces[]{w.pose, w.pose};
++	xrt_pose offsets[]{w.identity, w.identity};
++	xrt_space_relation results[2]{};
++	REQUIRE(xrt_space_overseer_locate_spaces(w.xso, w.xso->semantic.stage, &w.identity, 100, spaces, 2, offsets,
++	                                         results) == XRT_SUCCESS);
++	near(results[0].pose.orientation, before.pose.orientation);
++	near(results[1].pose.orientation, before.pose.orientation);
++}
++TEST_CASE("FlugelKranz rejects invalid batches without changing stage or corrections", "[flugelkranz]")
++{
++	World w;
++	REQUIRE(w.apply(&w, turn(0, 1, 0, .2f)) == XRT_SUCCESS);
++	auto before = w.locate();
++	xrt_pose moved{turn(0, 1, 0, .8f), {10, 20, 30}};
++	CHECK(w.apply(&w, {0, 0, 0, 0}, moved) != XRT_SUCCESS);
++	CHECK(w.apply(&w, {0, std::numeric_limits<float>::quiet_NaN(), 0, 1}, moved) != XRT_SUCCESS);
++	w.toe.device_type = XRT_DEVICE_TYPE_HMD;
++	CHECK(w.apply(&w, turn(0, 1, 0, .3f), moved) != XRT_SUCCESS);
++	w.toe.device_type = XRT_DEVICE_TYPE_GENERIC_TRACKER;
++	xrt_device *duplicates[]{&w.toe, &w.toe};
++	xrt_quat quats[]{turn(0, 1, 0, .1f), turn(0, 1, 0, .2f)};
++	CHECK(w.xso->flugelkranz_apply(w.xso, &w, &moved, 2, duplicates, quats) != XRT_SUCCESS);
++	near(w.locate().pose.orientation, before.pose.orientation);
++	auto position = w.locate().pose.position;
++	CHECK(position.x == Catch::Approx(before.pose.position.x));
++	CHECK(position.y == Catch::Approx(before.pose.position.y));
++	CHECK(position.z == Catch::Approx(before.pose.position.z));
++}
++TEST_CASE("FlugelKranz owner cleanup replacement and device removal clear offsets", "[flugelkranz]")
++{
++	World w;
++	int other_owner = 0;
++	auto raw = w.locate();
++	auto q = turn(0, 1, 0, .5f);
++	REQUIRE(w.apply(&w, q) == XRT_SUCCESS);
++	CHECK(w.apply(&other_owner, q) != XRT_SUCCESS);
++	// Unrelated client disconnect must not clear the owner's correction.
++	REQUIRE(w.xso->flugelkranz_apply(w.xso, &other_owner, nullptr, 0, nullptr, nullptr) == XRT_SUCCESS);
++	near(w.locate().pose.orientation, mul(q, raw.pose.orientation));
++	REQUIRE(w.xso->flugelkranz_apply(w.xso, &w, nullptr, 0, nullptr, nullptr) == XRT_SUCCESS);
++	near(w.locate().pose.orientation, raw.pose.orientation);
++	REQUIRE(w.apply(&other_owner, q) == XRT_SUCCESS);
++	REQUIRE(w.xso->flugelkranz_apply(w.xso, &other_owner, &w.identity, 0, nullptr, nullptr) == XRT_SUCCESS);
++	near(w.locate().pose.orientation, raw.pose.orientation);
++	REQUIRE(w.apply(&w, q) == XRT_SUCCESS);
++	REQUIRE(xrt_space_overseer_remove_device(w.xso, &w.toe) == XRT_SUCCESS);
++	REQUIRE(xrt_space_overseer_add_device(w.xso, &w.toe) == XRT_SUCCESS);
++	xrt_space_reference(&w.pose, nullptr);
++	REQUIRE(b_space_overseer_create_pose_space(w.b, &w.toe, XRT_INPUT_GENERIC_TRACKER_POSE, &w.pose) ==
++	        XRT_SUCCESS);
++	near(w.locate().pose.orientation, raw.pose.orientation);
++}
