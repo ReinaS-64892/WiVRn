@@ -45,7 +45,10 @@ struct vert_pc
 	glm::ivec4 a_rect;
 	std::array<float, 4> scale;
 	std::array<float, 4> bias;
+	// Active encoded width/height, excluding decoder padding.
+	glm::ivec4 encoded_size;
 };
+static_assert(sizeof(vert_pc) == 80);
 
 void stream_defoveator::ensure_vertices(size_t num_vertices)
 {
@@ -72,7 +75,7 @@ stream_defoveator::vertex * stream_defoveator::get_vertices(size_t view)
 	return reinterpret_cast<vertex *>(reinterpret_cast<uintptr_t>(buffer.map()) + view * vertices_size);
 }
 
-stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a)
+stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool manual_rgb, bool manual_a)
 {
 	auto & target = a ? pipeline_a[view] : pipeline_rgb[view];
 	if (*target.pipeline)
@@ -125,7 +128,9 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	// Fragment shader
 	auto specialization = make_specialization_constants(
 	        int32_t(alpha),
-	        VkBool32(application::get_hmd_traits().needs_srgb_conversion));
+	        VkBool32(application::get_hmd_traits().needs_srgb_conversion),
+	        VkBool32(manual_rgb),
+	        VkBool32(manual_a));
 	auto fragment_shader = load_shader(device, "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -312,6 +317,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		throw std::runtime_error("Invalid destination image index");
 
 	ensure_vertices(std::max(required_vertices(foveation[0]), required_vertices(foveation[1])));
+	std::array<glm::uvec2, view_count> encoded_sizes;
 
 	for (size_t view = 0; view < view_count; ++view)
 	{
@@ -378,6 +384,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 			        .uv = in,
 			};
 		}
+		encoded_sizes[view] = in;
 	}
 
 	for (size_t view = 0; view < view_count; ++view)
@@ -392,7 +399,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		};
 
 		const auto & input = inputs[view];
-		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a);
+		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, input.manual_rgb, input.manual_a);
 
 		std::array image_info{
 		        vk::DescriptorImageInfo{
@@ -428,6 +435,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                             input.rect_a.extent.height),
 		        .scale = scale,
 		        .bias = bias,
+		        .encoded_size = glm::ivec4(encoded_sizes[view], 0, 0),
 		};
 
 		device.updateDescriptorSets(descriptor_writes, {});

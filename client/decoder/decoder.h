@@ -72,6 +72,8 @@ public:
 	        const to_headset::video_stream_data_shard::view_info_t & view_info) = 0;
 
 	virtual vk::Sampler sampler() = 0;
+	// Nearest-only decoders need interpolation after the sampler's conversion.
+	virtual bool needs_manual_linear_filtering() const { return false; }
 
 	static const std::vector<wivrn::video_codec_capability> & supported_codecs();
 	static bool supports_10bit(wivrn::video_codec codec);
