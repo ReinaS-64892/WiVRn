@@ -135,6 +135,27 @@ int main(int argc, char ** argv)
 	a.restore_defaults();
 	require(a.lhMaxExtrapolationEnabled() && a.lhMaxExtrapolation() == 50);
 	require(!a.saveJson().contains("lh-max-extrapolation"));
+	// Streamed controller limits persist independently of Lighthouse settings.
+	a.loadJson("{}");
+	require(a.controllerMaxExtrapolation() == -1);
+	int prediction_changes = 0;
+	QObject::connect(&a, &Settings::controllerMaxExtrapolationChanged, [&] { ++prediction_changes; });
+	a.set_controllerMaxExtrapolation(20);
+	a.set_controllerMaxExtrapolation(20);
+	require(prediction_changes == 1);
+	b.loadJson(a.saveJson());
+	require(b.controllerMaxExtrapolation() == 20 && b.lhMaxExtrapolation() == 50);
+	b.set_controllerMaxExtrapolation(0);
+	a.loadJson(b.saveJson());
+	require(a.controllerMaxExtrapolation() == 0);
+	a.set_controllerMaxExtrapolation(-2);
+	a.set_controllerMaxExtrapolation(101);
+	require(a.controllerMaxExtrapolation() == 0);
+	a.restore_defaults();
+	require(a.controllerMaxExtrapolation() == -1);
+	require(!a.saveJson().contains("controller-max-extrapolation"));
+	a.loadJson(R"({"controller-max-extrapolation":"invalid"})");
+	require(a.controllerMaxExtrapolation() == -1);
 	// Manual selection survives roundtrip; disabling keeps remembered choices.
 	a.loadJson("{}");
 	require(a.lighthouseReferenceSerial().isEmpty());

@@ -17,11 +17,42 @@
  */
 
 #include "tracking_control.h"
+#include "configuration.h"
 
 #include "driver/wivrn_connection.h"
 #include "wivrn_config.h"
 #include <magic_enum_containers.hpp>
 #include <ranges>
+
+namespace
+{
+bool controller_pose(wivrn::device_id device)
+{
+	using enum wivrn::device_id;
+	switch (device)
+	{
+		case LEFT_GRIP:
+		case RIGHT_GRIP:
+		case LEFT_AIM:
+		case RIGHT_AIM:
+		case LEFT_PALM:
+		case RIGHT_PALM:
+		case LEFT_PINCH_POSE:
+		case RIGHT_PINCH_POSE:
+		case LEFT_POKE:
+		case RIGHT_POKE:
+			return true;
+		default:
+			return false;
+	}
+}
+} // namespace
+
+wivrn::tracking_control::tracking_control(wivrn_connection & cnx) :
+        cnx(cnx),
+        controller_prediction_limit_ns(configuration().controller_max_extrapolation * 1'000'000),
+        next(std::chrono::steady_clock::now() + step)
+{}
 
 bool wivrn::tracking_control::advance(std::chrono::steady_clock::time_point now)
 {
@@ -45,8 +76,16 @@ void wivrn::tracking_control::add_request(device_id device, XrTime now, XrTime a
 	{
 		try
 		{
-			cnx.send_control(to_headset::tracking_control(last_control));
-			last_control.pattern.push_back({.device = device, .prediction_ns = prediction});
+			if (controller_prediction_limit_ns >= 0 && controller_pose(device))
+			{
+				last_control.pattern.push_back({.device = device, .prediction_ns = 0});
+				cnx.send_control(to_headset::tracking_control(last_control));
+			}
+			else
+			{
+				cnx.send_control(to_headset::tracking_control(last_control));
+				last_control.pattern.push_back({.device = device, .prediction_ns = prediction});
+			}
 		}
 		catch (...)
 		{
@@ -108,11 +147,18 @@ void wivrn::tracking_control::resolve(XrDuration frame_time, XrDuration latency)
 		req.min_prediction = std::clamp(req.min_prediction + latency, 0l, max_extrapolation_ns);
 		req.max_prediction = std::clamp(req.max_prediction + latency, 0l, max_extrapolation_ns);
 
+		const bool limited = controller_prediction_limit_ns >= 0 && controller_pose(device_id(device));
+		if (limited)
+		{
+			req.min_prediction = 0;
+			req.max_prediction = std::min(req.max_prediction, controller_prediction_limit_ns);
+		}
+
 		for (int64_t t = req.min_prediction; t < req.max_prediction + step; t += step)
 		{
 			res.pattern.push_back({
 			        .device = device_id(device),
-			        .prediction_ns = t,
+			        .prediction_ns = limited ? std::min(t, req.max_prediction) : t,
 			});
 		}
 	}

@@ -243,6 +243,24 @@ cmake -S . -B build-server -GNinja \
 cmake --build build-server
 ```
 
+## `controller-max-extrapolation`
+
+Default: `-1` (keep the existing prediction policy). Integer milliseconds, `0`–`100`,
+with `-1` disabling this additional limit. Invalid values fall back to `-1`.
+
+Limits aim, grip, palm, pinch and poke poses streamed from the headset, independently
+of the Lighthouse setting. The dashboard exposes a checkbox and millisecond slider.
+Reconnect the headset after changing the setting.
+
+The limit is measured from the latest sample's production time, including prediction
+already performed on the headset. `0` evaluates at that production time. When enabled,
+WiVRn also requests unpredicted controller samples and caps predicted sample requests.
+Existing transport/extrapolation safety bounds still apply. Joint skeletons retain
+their separate tracking policy. Head poses, views and Lighthouse devices are unaffected.
+
+Head pose limits for xrizer gameplay are deferred; see the
+[xrizer integration guide](xrizer-game-pose-limit.md).
+
 ## `lh-max-extrapolation`
 Default value: `50` ms (also used when unset)
 
