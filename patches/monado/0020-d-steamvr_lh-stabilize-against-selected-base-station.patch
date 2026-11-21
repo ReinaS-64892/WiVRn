@@ -1,6 +1,6 @@
-From 3d3980b14b9d00236f89cba5ad56a7a098ed15ef Mon Sep 17 00:00:00 2001
+From 6c4fc3aa80dada6bd855d1fa90b34393dec41e90 Mon Sep 17 00:00:00 2001
 From: OpenAI Codex <codex@openai.com>
-Date: Mon, 19 Oct 2026 19:20:53 +0900
+Date: Tue, 20 Oct 2026 16:07:21 +0900
 Subject: [PATCH] d/steamvr_lh: stabilize against selected base station
 
 Opt in with an explicit reference serial and normalize composed poses to the base origin before history insertion. Match sample timestamps and world transforms to bounded reference epochs, hold known corrections for static references, and invalidate unmatched generations. Rotate velocities without introducing correction-switch velocities. Preserve raw recordings and add corrected poses and state diagnostics. Report reference discovery through a startup callback for WiVRn candidate persistence. Test math, generation boundaries, real Device history/prediction, loss and restart behavior.
@@ -8,7 +8,7 @@ Opt in with an explicit reference serial and normalize composed poses to the bas
  src/xrt/drivers/CMakeLists.txt                |   1 +
  .../steamvr_lh/base_station_stabilizer.cpp    | 120 ++++++++
  .../steamvr_lh/base_station_stabilizer.hpp    |  45 +++
- src/xrt/drivers/steamvr_lh/device.cpp         |  49 +++-
+ src/xrt/drivers/steamvr_lh/device.cpp         |  47 ++-
  src/xrt/drivers/steamvr_lh/device.hpp         |   1 +
  .../drivers/steamvr_lh/interfaces/context.hpp |   2 +
  .../drivers/steamvr_lh/reference_recorder.cpp |  24 ++
@@ -18,7 +18,7 @@ Opt in with an explicit reference serial and normalize composed poses to the bas
  tests/CMakeLists.txt                          |  10 +-
  tests/tests_steamvr_lh_references.cpp         |  14 +-
  tests/tests_steamvr_lh_stabilization.cpp      | 272 ++++++++++++++++++
- 13 files changed, 549 insertions(+), 16 deletions(-)
+ 13 files changed, 549 insertions(+), 14 deletions(-)
  create mode 100644 src/xrt/drivers/steamvr_lh/base_station_stabilizer.cpp
  create mode 100644 src/xrt/drivers/steamvr_lh/base_station_stabilizer.hpp
  create mode 100644 tests/tests_steamvr_lh_stabilization.cpp
@@ -213,7 +213,7 @@ index 000000000..6cc56d0c4
 +	int64_t last_observation_ns{0}, last_valid_capture_ns{0};
 +};
 diff --git a/src/xrt/drivers/steamvr_lh/device.cpp b/src/xrt/drivers/steamvr_lh/device.cpp
-index b31dc461f..d9d2fa81a 100644
+index 3c889c1bd..d9d2fa81a 100644
 --- a/src/xrt/drivers/steamvr_lh/device.cpp
 +++ b/src/xrt/drivers/steamvr_lh/device.cpp
 @@ -1130,12 +1130,6 @@ copy_pose(const vr::HmdQuaternion_t &orientation, const double (&position)[3])
@@ -279,13 +279,11 @@ index b31dc461f..d9d2fa81a 100644
  		metadata.composed = {p.position.x,    p.position.y,    p.position.z,   p.orientation.x,
  		                     p.orientation.y, p.orientation.z, p.orientation.w};
  		metadata.chaperone = {chaperone.position.x,    chaperone.position.y,    chaperone.position.z,
-@@ -1296,9 +1326,8 @@ Device::update_pose(const vr::DriverPose_t &newPose, uint32_t index, int64_t cap
+@@ -1296,7 +1326,8 @@ Device::update_pose(const vr::DriverPose_t &newPose, uint32_t index, int64_t cap
  	if (recording_class == vr::TrackedDeviceClass_TrackingReference)
  		return;
  
--	// OpenVR poseTimeOffset is in seconds; relation history timestamps are in nanoseconds.
--	const int64_t pose_time_offset_ns = static_cast<int64_t>(newPose.poseTimeOffset * 1000000000.0);
--	const int64_t ts = chrono_timestamp_ns() + pose_time_offset_ns;
+-	const int64_t ts = chrono_timestamp_ns() + time_s_to_ns(newPose.poseTimeOffset);
 +	if (!valid_time)
 +		return; // Raw invalid timestamps remain recorded, never cast to int64 or inserted.
  
@@ -376,7 +374,7 @@ index bd85faff9..87578a38f 100644
  };
  // Initialize during startup/discovery, never the high-rate pose callback.
 diff --git a/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp b/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
-index 5c3cddbc7..b8d16fb56 100644
+index 49561f00a..5ff388d0d 100644
 --- a/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
 +++ b/src/xrt/drivers/steamvr_lh/steamvr_lh.cpp
 @@ -87,6 +87,7 @@ DEBUG_GET_ONCE_BOOL_OPTION(lh_diagnostic_references, "LH_DIAGNOSTIC_REFERENCES",
@@ -399,7 +397,7 @@ index 5c3cddbc7..b8d16fb56 100644
  {}
  
  Context::~Context()
-@@ -511,7 +513,9 @@ Context::TrackedDeviceAdded(const char *pchDeviceSerialNumber,
+@@ -512,7 +514,9 @@ Context::TrackedDeviceAdded(const char *pchDeviceSerialNumber,
  	}
  	case vr::TrackedDeviceClass_TrackingReference: {
  		CTX_INFO("Found lighthouse base station: %s", pchDeviceSerialNumber);
@@ -410,7 +408,7 @@ index 5c3cddbc7..b8d16fb56 100644
  			added = setup_tracking_reference(pchDeviceSerialNumber, pDriver);
  		break;
  	}
-@@ -1048,6 +1052,12 @@ Context::Log(const char *pchLogMessage)
+@@ -1049,6 +1053,12 @@ Context::Log(const char *pchLogMessage)
  }
  // NOLINTEND(bugprone-easily-swappable-parameters)
  
@@ -440,10 +438,10 @@ index 9eb703285..e55390766 100644
   * Creates the steamvr system devices.
   *
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 0bd5670a8..e4d433254 100644
+index 09d8999e3..8e040aac8 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -148,5 +148,13 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
+@@ -162,5 +162,13 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
  	target_include_directories(tests_steamvr_lh_references PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/drivers/steamvr_lh)
  	add_test(NAME steamvr_lh_references_on COMMAND tests_steamvr_lh_references on)
  	add_test(NAME steamvr_lh_references_off COMMAND tests_steamvr_lh_references off)
