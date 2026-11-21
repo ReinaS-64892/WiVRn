@@ -243,3 +243,18 @@ WiVRn uses the following software:
 - [VulkanMemoryAllocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator)
 - [WebXR input profiles](https://www.npmjs.com/package/@webxr-input-profiles/motion-controllers)
 - [x264](https://www.videolan.org/developers/x264.html) optional, for software encoding
+
+
+## Local FlugelKranz libmonado extension
+
+This fork carries `patches/monado/0036-flugelkranz-device-rotation.patch`.
+It adds two optional private exports without changing the upstream libmonado ABI version:
+
+- `mnd_root_flugelkranz_refresh_devices(root)` refreshes the device snapshot. Re-read serial properties and resolve `device_index` after each refresh; indices and returned property strings must not be retained across refreshes.
+- `mnd_root_flugelkranz_apply(root, stage_offset, count, rotations)` atomically replaces STAGE and up to 32 per-device orientation corrections. Each entry contains a `device_index` and a unit quaternion in Monado root axes. The correction left-multiplies orientation about the tracked position; it does not rotate position or change tracking-origin calibration. The array is a complete replacement, and count zero clears corrections.
+
+Only generic trackers are accepted. Duplicate indices, invalid quaternions, invalid STAGE poses and unsupported spaces are rejected before modifying state. One IPC connection owns a nonempty correction set; its disconnect clears the set, and device removal clears that device. Driver poses remain raw. OpenXR space queries see the corrected orientation, with angular velocity marked invalid because no correction derivative is supplied. Physical ankle rotation remains visible.
+
+Use the matching server, OpenXR runtime and libmonado from the same build because the IPC protocol changes. FlugelKranz probes the optional exports and continues without foot compensation on older libraries. `--diagnose` reports support. The ordinary `mnd_root_set_reference_space_offset` entry point remains available.
+
+The patch includes `tests_flugelkranz_rotation`, covering tilted tracking origins, physical ankle motion, position preservation, STAGE composition, inverse/batched space queries, validation, ownership cleanup and device removal. With `WIVRN_BUILD_TEST=ON`, run it with `ctest --test-dir BUILD_DIR/server -R flugelkranz --output-on-failure`. A standalone Monado build exposes the same cases as `tests_flugelkranz_rotation` in its build directory. Hardware/VRChat behavior requires separate verification.
