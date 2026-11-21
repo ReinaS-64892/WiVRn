@@ -30,6 +30,7 @@
 #include "utils/async.h"
 #include "utils/i18n.h"
 #include "utils/mapped_file.h"
+#include "video_diagnostics.h"
 #if WIVRN_CLIENT_DEBUG_MENU
 #include "utils/ranges.h"
 #endif
@@ -1167,6 +1168,9 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> scenes::lobby::draw_gui(XrTi
 			main_child->ContentRegionRect.Max.x -= content_margin;
 		}
 		ImGui::SetCursorPosY(20);
+
+		if (current_tab == tab::server_list || current_tab == tab::system)
+			wivrn::gui::video_recording_button();
 
 		switch (current_tab)
 		{

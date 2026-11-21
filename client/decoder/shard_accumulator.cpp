@@ -20,6 +20,7 @@
 #include "shard_accumulator.h"
 #include "scenes/stream.h" // IWYU pragma: keep
 #include "spdlog/spdlog.h"
+#include "video_diagnostics.h"
 #include "xr/instance.h"
 #include <algorithm>
 #include <cmath>
@@ -40,6 +41,8 @@ void shard_set::reset(uint64_t frame_index)
 {
 	data.clear();
 	deadline.reset();
+	reliable = false;
+	assembled_at = 0;
 
 	uint8_t stream_index = feedback.stream_index;
 	feedback = {};
@@ -65,18 +68,26 @@ static bool is_complete(const shard_set & shards)
 	return true;
 }
 
-std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDuration max_wait, XrDuration reserve)
+std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable_transport)
 {
 	// A source symbol must belong to the range advertised by its unit.
 	const auto & unit = shard.unit;
 	if (!valid_video_symbol(unit, shard.shard_idx, shard.payload.size()))
 		return {};
-	if (empty())
+	const bool first = empty();
+	if (first)
 	{
 		feedback.received_first_packet = now;
 		deadline = now + max_wait;
 	}
-	if (shard.view_info && shard.view_info->display_time > 0)
+	if (reliable_transport && !reliable)
+	{
+		// Recovery IDRs and parameter sets travel over control/TCP. Cutting
+		// those at the short UDP loss timeout can prevent decoder startup.
+		reliable = true;
+		deadline = feedback.received_first_packet + 100'000'000;
+	}
+	if (!reliable && shard.view_info && shard.view_info->display_time > 0)
 	{
 		const auto predicted_deadline = shard.view_info->display_time - reserve;
 		// The server pacer starts without decoded/displayed timing samples.
@@ -85,6 +96,8 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDur
 		if (predicted_deadline > feedback.received_first_packet)
 			deadline = std::min(*deadline, predicted_deadline);
 	}
+	if (first)
+		video_diagnostics::get().record({.kind = "frame_first_packet", .xr_ns = now, .frame = shard.frame_idx, .stream = shard.stream_item_idx, .deadline_ns = *deadline, .display_ns = shard.view_info ? shard.view_info->display_time : 0, .budget_ns = reliable ? 100'000'000 : max_wait, .reliable = reliable});
 
 	auto idx = shard.shard_idx;
 	if (idx >= data.size())
@@ -92,6 +105,8 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDur
 	if (data[idx])
 		return {};
 	data[idx] = std::move(shard);
+	if (is_complete(*this))
+		assembled_at = now;
 	return idx;
 }
 
@@ -107,6 +122,12 @@ shard_accumulator::statistics & shard_accumulator::statistics::operator+=(const 
 	wait_samples += other.wait_samples;
 	wait_sum += other.wait_sum;
 	wait_max = std::max(wait_max, other.wait_max);
+	normal_wait_samples += other.normal_wait_samples;
+	normal_wait_sum += other.normal_wait_sum;
+	normal_wait_max = std::max(normal_wait_max, other.normal_wait_max);
+	reliable_wait_max = std::max(reliable_wait_max, other.reliable_wait_max);
+	no_slice += other.no_slice;
+	partial_unsupported += other.partial_unsupported;
 	return *this;
 }
 
@@ -189,7 +210,7 @@ void shard_accumulator::advance()
 	next.reset(current.frame_index() + 1);
 }
 
-void shard_accumulator::push_shard(video_stream_data_shard && shard)
+void shard_accumulator::push_shard(video_stream_data_shard && shard, bool reliable)
 {
 	assert(current.frame_index() + 1 == next.frame_index());
 	if (!valid_video_symbol(shard.unit, shard.shard_idx, shard.payload.size()))
@@ -199,6 +220,7 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 		current.reset(shard.frame_idx);
 		next.reset(shard.frame_idx + 1);
 		started = true;
+		published_receive_budget.store(assembly_budget.value(), std::memory_order_relaxed);
 	}
 	const auto now = instance.now();
 	expire(now);
@@ -210,15 +232,16 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 		// frame is in the past, drop it
 		std::lock_guard lock(statistics_mutex);
 		++pending_statistics.late_packets;
+		video_diagnostics::get().record({.kind = "late_packet", .xr_ns = now, .frame = shard.frame_idx, .stream = shard.stream_item_idx, .received = shard.shard_idx, .reliable = reliable});
 	}
 	else if (frame_diff == 0)
 	{
-		if (current.insert(std::move(shard), now, max_wait, reserve))
+		if (current.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable))
 			try_submit_frame();
 	}
 	else if (frame_diff == 1)
 	{
-		next.insert(std::move(shard), now, max_wait, reserve);
+		next.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable);
 		if (is_complete(next))
 		{
 			finish_current();
@@ -231,7 +254,7 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 		finish_current();
 		advance();
 		try_submit_frame();
-		push_shard(std::move(shard));
+		push_shard(std::move(shard), reliable);
 	}
 	else
 	{
@@ -247,7 +270,7 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 		current.reset(shard.frame_idx);
 		next.reset(shard.frame_idx + 1);
 
-		push_shard(std::move(shard));
+		push_shard(std::move(shard), reliable);
 	}
 	expire(now);
 }
@@ -302,9 +325,59 @@ void shard_accumulator::finish_current(bool expired)
 	}
 	current.feedback.stream_corrupted = !complete;
 	if (complete)
-		current.feedback.received_last_packet = now;
+		current.feedback.received_last_packet = current.assembled_at;
 
 	const bool submit = view && !payload.spans.empty() && (complete || (allow_partial && payload.has_vcl));
+	const auto wait = std::max<XrDuration>(0, now - current.feedback.received_first_packet);
+	const auto budget = assembly_budget.value();
+	if (!current.reliable)
+	{
+		if (complete)
+			assembly_budget.complete(std::max<XrDuration>(0, current.assembled_at - current.feedback.received_first_packet));
+		else
+			assembly_budget.incomplete();
+		published_receive_budget.store(assembly_budget.value(), std::memory_order_relaxed);
+	}
+	if (video_diagnostics::get().active())
+	{
+		uint64_t received = 0, expected = 0, units = 0, vcl = 0;
+		for (const auto & shard: current.data)
+			if (shard)
+			{
+				++received;
+				expected = std::max<uint64_t>(expected, uint64_t(shard->unit.first_shard) + shard->unit.shard_count);
+			}
+		// Count whole units, not the number of packet spans in those units.
+		for (const auto & shard: current.data)
+			if (shard && shard->shard_idx == shard->unit.first_shard)
+			{
+				bool intact = true;
+				for (uint32_t i = shard->unit.first_shard; i < uint32_t(shard->unit.first_shard) + shard->unit.shard_count; ++i)
+					intact &= i < current.data.size() && current.data[i] && current.data[i]->unit == shard->unit;
+				units += intact;
+				vcl += intact && shard->unit.vcl;
+			}
+		video_diagnostics::get().record({.kind = "frame", .detail = complete ? "complete" : !view      ? "no_view"
+		                                                                            : !allow_partial   ? "partial_unsupported"
+		                                                                            : !payload.has_vcl ? "no_intact_slice"
+		                                                                                               : "partial",
+		                                 .xr_ns = now,
+		                                 .frame = current.frame_index(),
+		                                 .stream = current.feedback.stream_index,
+		                                 .first_ns = current.feedback.received_first_packet,
+		                                 .deadline_ns = current.deadline.value_or(0),
+		                                 .display_ns = view ? view->display_time : 0,
+		                                 .wait_ns = wait,
+		                                 .budget_ns = budget,
+		                                 .received = received,
+		                                 .expected_min = expected,
+		                                 .units = units,
+		                                 .vcl = vcl,
+		                                 .reliable = current.reliable,
+		                                 .complete = complete,
+		                                 .submitted = submit,
+		                                 .expired = expired});
+	}
 	{
 		std::lock_guard lock(statistics_mutex);
 		pending_statistics.complete += complete;
@@ -312,16 +385,26 @@ void shard_accumulator::finish_current(bool expired)
 		pending_statistics.partial += submit && !complete;
 		pending_statistics.dropped += !submit;
 		pending_statistics.expired += expired;
-		const auto wait = std::max<XrDuration>(0, now - current.feedback.received_first_packet);
 		++pending_statistics.wait_samples;
 		pending_statistics.wait_sum += wait;
 		pending_statistics.wait_max = std::max(pending_statistics.wait_max, wait);
+		if (current.reliable)
+			pending_statistics.reliable_wait_max = std::max(pending_statistics.reliable_wait_max, wait);
+		else
+		{
+			++pending_statistics.normal_wait_samples;
+			pending_statistics.normal_wait_sum += wait;
+			pending_statistics.normal_wait_max = std::max(pending_statistics.normal_wait_max, wait);
+		}
+		pending_statistics.no_slice += !complete && allow_partial && !payload.has_vcl;
+		pending_statistics.partial_unsupported += !complete && !allow_partial;
 	}
 	if (submit)
 	{
 		current.feedback.sent_to_decoder = now;
 		decoder_->push_data(payload.spans, current.frame_index(), false);
 		decoder_->frame_completed(current.feedback, *view);
+		video_diagnostics::get().record({.kind = "decoder_submit_complete", .xr_ns = instance.now(), .frame = current.frame_index(), .stream = current.feedback.stream_index});
 	}
 	send_feedback(current.feedback);
 }

@@ -20,6 +20,7 @@
 #pragma once
 
 #include "decoder.h"
+#include "receive_time_budget.h"
 #include "wivrn_packets.h"
 
 #include <atomic>
@@ -53,10 +54,12 @@ public:
 	{
 		std::vector<std::optional<data_shard>> data;
 		std::optional<XrTime> deadline;
+		bool reliable = false;
+		XrTime assembled_at = 0;
 		void reset(uint64_t frame_index);
 		bool empty() const;
 
-		std::optional<uint16_t> insert(data_shard &&, XrTime now, XrDuration max_wait, XrDuration reserve);
+		std::optional<uint16_t> insert(data_shard &&, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable);
 
 		wivrn::from_headset::feedback feedback{};
 
@@ -85,6 +88,12 @@ public:
 		uint64_t wait_samples = 0;
 		XrDuration wait_sum = 0;
 		XrDuration wait_max = 0;
+		uint64_t normal_wait_samples = 0;
+		XrDuration normal_wait_sum = 0;
+		XrDuration normal_wait_max = 0;
+		XrDuration reliable_wait_max = 0;
+		uint64_t no_slice = 0;
+		uint64_t partial_unsupported = 0;
 		statistics & operator+=(const statistics &);
 	};
 
@@ -95,6 +104,8 @@ private:
 	xr::instance & instance;
 	const bool allow_partial;
 	const XrDuration max_wait;
+	receive_time_budget assembly_budget;
+	std::atomic<XrDuration> published_receive_budget;
 	std::atomic<XrDuration> decode_budget = 4'000'000;
 	std::mutex statistics_mutex;
 	statistics pending_statistics;
@@ -114,12 +125,18 @@ public:
 	        weak_scene(scene),
 	        instance(instance),
 	        allow_partial(description.codec[stream_index] == h264 || description.codec[stream_index] == h265),
-	        max_wait(receive_budget(description.frame_rate))
+	        max_wait(receive_budget(description.frame_rate)),
+	        assembly_budget(max_wait),
+	        published_receive_budget(0)
 	{
 		next.reset(1);
 	}
 
-	void push_shard(wivrn::to_headset::video_stream_data_shard &&);
+	void push_shard(wivrn::to_headset::video_stream_data_shard &&, bool reliable = false);
+	XrDuration current_receive_budget() const
+	{
+		return published_receive_budget.load(std::memory_order_relaxed);
+	}
 	// Called on the network thread, even when no packets arrive.
 	void expire(XrTime now);
 	std::optional<XrTime> next_deadline() const;

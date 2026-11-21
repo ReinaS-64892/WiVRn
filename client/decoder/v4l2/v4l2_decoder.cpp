@@ -9,6 +9,7 @@
  */
 
 #include "v4l2_decoder.h"
+#include "video_diagnostics.h"
 
 #include "application.h"
 #include "scenes/stream.h"
@@ -749,6 +750,7 @@ void decoder::handle_events()
 		}
 		if (event.type == V4L2_EVENT_SOURCE_CHANGE && (event.u.src_change.changes & V4L2_EVENT_SRC_CH_RESOLUTION))
 		{
+			video_diagnostics::get().record({.kind = "decoder_source_change"});
 			if (capture_buffers.empty())
 			{
 				// iris has now parsed enough VPS/SPS/PPS data for G_FMT(CAPTURE) to describe the real stream
@@ -765,6 +767,7 @@ void decoder::handle_events()
 			v4l2_buf_type type = capture_type;
 			ioctl_or_throw(fd.get_fd(), VIDIOC_STREAMON, &type, "VIDIOC_STREAMON(CAPTURE after source change)");
 			capture_streaming = true;
+			video_diagnostics::get().record({.kind = "decoder_capture_ready"});
 		}
 	}
 }
@@ -915,6 +918,7 @@ void decoder::worker_loop(std::stop_token stop_token)
 		catch (const std::exception & e)
 		{
 			spdlog::error("V4L2 iris decoder worker failed: {}", e.what());
+			video_diagnostics::get().record({.kind = "decoder_error", .detail = e.what()});
 		}
 	}
 }
@@ -970,6 +974,7 @@ void decoder::drain_capture()
 			// Iris can return a concealed picture for an intentionally incomplete
 			// access unit. Keep it so intact slices still update the display.
 			const bool concealed = it != pending_frames.end() && it->feedback.stream_corrupted && planes[0].bytesused;
+			video_diagnostics::get().record({.kind = "decoder_capture_error", .detail = concealed ? "concealed" : "discarded", .frame = it != pending_frames.end() ? it->feedback.frame_index : 0, .stream = it != pending_frames.end() ? it->feedback.stream_index : 0u});
 			if (!concealed)
 			{
 				if (it != pending_frames.end())

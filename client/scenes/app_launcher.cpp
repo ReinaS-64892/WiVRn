@@ -18,6 +18,7 @@
  */
 
 #include "app_launcher.h"
+#include "video_diagnostics.h"
 
 #include "application.h"
 #include "configuration.h"
@@ -161,6 +162,7 @@ app_launcher::clicked app_launcher::draw_gui(imgui_context & imgui_ctx, const st
 		ui::page_header(_cS("status in the title bar", "Connected"), subtitle);
 	else
 		ui::page_header(fmt::format(_F("Connected to {}"), server_name), subtitle);
+	wivrn::gui::video_recording_button();
 	const float content_y = ImGui::GetCursorPosY();
 
 	const bool has_apps = not apps->empty();

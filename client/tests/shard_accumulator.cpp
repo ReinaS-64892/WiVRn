@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "decoder/shard_accumulator.h"
+#include "packet_dispatch.h"
 #include "scenes/stream.h"
 #include "xr/instance.h"
 
@@ -156,20 +157,20 @@ int main()
 		data.view_info->display_time = 22'000'000;
 		timed.push_shard(std::move(data));
 	}
-	require(timed.next_deadline() == 16'000'000); // 4 ms decode + 2 ms render
-	test_time = 15'999'999;
+	require(timed.next_deadline() == 14'000'000); // Initial 4 ms assembly budget wins over the prediction
+	test_time = 13'999'999;
 	timed.expire(test_time);
 	require(recording->frames.empty());
 	timed.push_shard(packet(0, 0)); // duplicate/far prediction cannot extend the timer
-	require(timed.next_deadline() == 16'000'000);
-	test_time = 16'000'000;
+	require(timed.next_deadline() == 14'000'000);
+	test_time = 14'000'000;
 	timed.expire(test_time);
 	require(recording->frames.size() == 1 && recording->frames[0].feedback.stream_corrupted);
 	require(recording->frames[0].bytes == std::vector<uint8_t>({0, 1, 2}));
 	require(!timed.next_deadline());
 	auto stats = timed.take_statistics();
 	require(stats.incomplete == 1 && stats.partial == 1 && stats.expired == 1 && stats.dropped == 0);
-	require(stats.wait_samples == 1 && stats.wait_sum == 6'000'000 && stats.wait_max == 6'000'000);
+	require(stats.wait_samples == 1 && stats.wait_sum == 4'000'000 && stats.wait_max == 4'000'000);
 	timed.expire(test_time + 100'000'000);
 	timed.push_shard(packet(0, 4));
 	timed.push_shard(packet(0, 5));
@@ -190,12 +191,12 @@ int main()
 	require(stats.incomplete == 1 && stats.dropped == 1 && stats.partial == 0 && stats.expired == 1);
 	require(recording->frames.size() == 1);
 
-	// No prediction metadata: cap the wait at one frame period.
+	// No prediction metadata: use the initial 4 ms assembly budget.
 	const auto started = test_time;
 	auto no_view = packet(2, 0);
 	no_view.view_info.reset();
 	timed.push_shard(std::move(no_view));
-	require(timed.next_deadline() == started + 11'111'111);
+	require(timed.next_deadline() == started + 4'000'000);
 	test_time = *timed.next_deadline();
 	timed.expire(test_time);
 	stats = timed.take_statistics();
@@ -222,7 +223,7 @@ int main()
 	auto stale = packet(5, 0);
 	stale.view_info->display_time = test_time;
 	timed.push_shard(std::move(stale));
-	require(timed.next_deadline() == test_time + 11'111'111);
+	require(timed.next_deadline() == test_time + 4'000'000);
 	test_time = *timed.next_deadline();
 	timed.expire(test_time);
 	require(!timed.next_deadline());
@@ -263,7 +264,7 @@ int main()
 	require(stats.partial == 1 && stats.expired == 1 && stats.late_packets == 1 && stats.unobserved_frames == 0);
 
 	// Bound the fallback on both slow and fast video streams.
-	for (const auto [rate, limit]: {std::pair{30.f, XrDuration(20'000'000)}, std::pair{1000.f, XrDuration(2'000'000)}})
+	for (const auto [rate, limit]: {std::pair{30.f, XrDuration(4'000'000)}, std::pair{1000.f, XrDuration(2'000'000)}})
 	{
 		description.frame_rate = rate;
 		wivrn::shard_accumulator bounded(device, physical_device, instance, 0, description, {}, 0);
@@ -286,5 +287,103 @@ int main()
 	require(stats.complete == 1 && stats.incomplete == 0 && stats.expired == 0);
 	require(stats.wait_samples == 1 && stats.wait_sum == 1'000'000 && stats.wait_max == 1'000'000);
 	require(!complete.next_deadline());
+	// Fast intact UDP samples learn a 1.3x mean; slow outliers are excluded.
+	wivrn::receive_time_budget learned(11'111'111);
+	for (int i = 0; i < 24; ++i)
+		learned.complete(2'000'000);
+	for (int i = 0; i < 8; ++i)
+		learned.complete(8'000'000);
+	require(learned.value() == 2'600'000);
+	for (int i = 0; i < 8; ++i)
+		learned.incomplete();
+	require(learned.value() == 4'000'000);
+	for (int i = 0; i < 64; ++i)
+		learned.incomplete();
+	require(learned.value() == 11'111'111);
+	for (int i = 0; i < 32; ++i)
+		learned.complete(2'000'000);
+	require(learned.value() == 2'600'000);
+
+	// Actual assembler follows the learned budget, not just the estimator.
+	recording = std::make_shared<recording_decoder>();
+	wivrn::shard_accumulator adaptive(device, physical_device, instance, 0, description, {}, 0);
+	for (uint64_t f = 100; f < 132; ++f)
+	{
+		for (int i = 0; i < 6; ++i)
+		{
+			if (i)
+				test_time += 400'000;
+			adaptive.push_shard(packet(f, i));
+		}
+		test_time += 9'000'000;
+	}
+	require(adaptive.current_receive_budget() == 2'600'000);
+	adaptive.push_shard(packet(132, 0));
+	require(adaptive.next_deadline() == test_time + 2'600'000);
+	test_time = *adaptive.next_deadline();
+	adaptive.expire(test_time);
+
+	// TCP recovery IDRs can finish beyond both the UDP and display deadlines.
+	// A fresh receiver accepts high server frame IDs after reconnect.
+	recording = std::make_shared<recording_decoder>();
+	wivrn::shard_accumulator recovery(device, physical_device, instance, 0, description, {}, 0);
+	const auto recovery_start = test_time;
+	for (int i = 0; i < 6; ++i)
+	{
+		auto data = packet(5000, i);
+		data.view_info->display_time = recovery_start + 8'000'000;
+		recovery.push_shard(std::move(data), true);
+		if (i != 5)
+			test_time += 6'000'000;
+	}
+	require(recording->frames.size() == 1 && !recording->frames[0].feedback.stream_corrupted);
+	require(!recovery.next_deadline() && recovery.current_receive_budget() == 4'000'000);
+	stats = recovery.take_statistics();
+	require(stats.reliable_wait_max == 30'000'000 && stats.normal_wait_samples == 0 && stats.unobserved_frames == 0);
+	recovery.push_shard(packet(5001, 0), true);
+	require(recovery.next_deadline() == test_time + 100'000'000);
+	test_time = *recovery.next_deadline();
+	recovery.expire(test_time);
+	require(recovery.take_statistics().expired == 1);
+	// Advancing over a gap must preserve the packet's reliable provenance.
+	recovery.push_shard(packet(5004, 0), true);
+	require(recovery.next_deadline() == test_time + 100'000'000);
+	test_time = *recovery.next_deadline();
+	recovery.expire(test_time);
+	recovery.push_shard(packet(5010, 0), true);
+	require(recovery.next_deadline() == test_time + 100'000'000);
+
+	// Capture assembly completion before any subsequent decoder submission work.
+	wivrn::shard_accumulator::shard_set assembled(0);
+	for (int i = 0; i < 6; ++i)
+		assembled.insert(packet(0, i), 1'000'000 + i * 100'000, 4'000'000, 0, false);
+	require(assembled.assembled_at == 1'500'000);
+	assembled.insert(packet(0, 5), 3'000'000, 4'000'000, 0, false);
+	require(assembled.assembled_at == 1'500'000);
+	assembled.reset(1);
+	require(assembled.assembled_at == 0 && !assembled.reliable);
+
+	// Existing visitors stay single-argument; video gets transport provenance.
+	struct visitor
+	{
+		bool reliable = false;
+		int other = 0;
+		void operator()(int, bool value)
+		{
+			reliable = value;
+		}
+		void operator()(std::unique_ptr<int> value)
+		{
+			other = *value;
+		}
+	} dispatch;
+	std::variant<int, std::unique_ptr<int>> data(1);
+	wivrn::dispatch_packet(dispatch, std::move(data), true);
+	require(dispatch.reliable);
+	wivrn::dispatch_packet(dispatch, std::move(data), false);
+	require(!dispatch.reliable);
+	data = std::make_unique<int>(42);
+	wivrn::dispatch_packet(dispatch, std::move(data), true);
+	require(dispatch.other == 42);
 	std::cout << "Accumulator: deadlines, silence, late packets, statistics, decode reserve and frame assembly passed\n";
 }

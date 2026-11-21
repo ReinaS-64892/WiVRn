@@ -20,6 +20,7 @@
 #pragma once
 
 #include "crypto.h"
+#include "packet_dispatch.h"
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
 #include <chrono>
@@ -88,12 +89,12 @@ public:
 		bool received_pending = false;
 		while (auto packet = stream.receive_pending(&bytes_received_))
 		{
-			std::visit(std::forward<T>(visitor), std::move(*packet));
+			dispatch_packet(visitor, std::move(*packet), false);
 			received_pending = true;
 		}
 		while (auto packet = control.receive_pending(&bytes_received_))
 		{
-			std::visit(std::forward<T>(visitor), std::move(*packet));
+			dispatch_packet(visitor, std::move(*packet), true);
 			received_pending = true;
 		}
 		// Visitors may have armed a video deadline while draining a batch. Let
@@ -116,7 +117,7 @@ public:
 			auto packet = stream.receive(&bytes_received_);
 			if (packet)
 			{
-				std::visit(std::forward<T>(visitor), std::move(*packet));
+				dispatch_packet(visitor, std::move(*packet), false);
 			}
 		}
 
@@ -124,7 +125,7 @@ public:
 		{
 			auto packet = control.receive(&bytes_received_);
 			if (packet)
-				std::visit(std::forward<T>(visitor), std::move(*packet));
+				dispatch_packet(visitor, std::move(*packet), true);
 		}
 
 		return r;

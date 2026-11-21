@@ -1421,3 +1421,50 @@ msgstr "フレーム数は表示周期ごとの全ストリーム合計です。
 #, c++-format
 msgid "Unobserved frame IDs: {} (may include frames skipped by the server)"
 msgstr "未受信のフレーム ID：{}（サーバー側の送信スキップを含む場合があります）"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+msgid "Record diagnostics"
+msgstr "診断ログを記録"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+msgid "Stop diagnostic recording"
+msgstr "診断ログの記録を停止"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Diagnostic log: {}"
+msgstr "診断ログ：{}"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Recording error: {}"
+msgstr "記録エラー：{}"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Recording queue overflow: {} events lost"
+msgstr "記録キュー超過：{} 件のイベントが欠落"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+msgid "Receive wait (UDP)"
+msgstr "受信待ち時間（UDP）"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+msgid "Adaptive limit"
+msgstr "適応待機上限"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+msgid "Reliable receive wait"
+msgstr "確実配送の受信待ち時間"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+msgid "Discard reasons"
+msgstr "完全破棄の理由"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+msgid "No intact slice"
+msgstr "完全なスライスなし"
+
+#: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
+msgid "Partial decoding unsupported"
+msgstr "部分復号非対応"

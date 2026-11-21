@@ -40,15 +40,32 @@ min(predicted_display_time - decode_reserve - 2 ms,
 
 The decode reserve starts at 4 ms and follows measured decoder turnaround
 (including queue time): 125% of the latest 1–16 ms clamped sample, with a 1%
-decay per decoded frame. The receive budget is one described video frame period,
-clamped to 2–20 ms (90 fps fallback for an invalid rate). Without view metadata,
+decay per decoded frame. The UDP receive budget starts at 4 ms (or the ceiling
+below, if smaller). After eight complete UDP samples it becomes 1.3 times the
+mean of the fastest 75% of the last 32 complete UDP assembly durations, with a
+1 ms floor. The ceiling is one described video frame period clamped to 2–20 ms
+(90 fps fallback for an invalid rate). Slow successful outliers, truncated
+frames, decoder turnaround and TCP recovery do not train the normal budget.
+After eight consecutive incomplete UDP frames, expand the budget by 50% to at
+least 4 ms, within the ceiling, and restart learning. This avoids permanently
+censoring slower samples after a sustained network change. Without view metadata,
 the first-packet limit still applies. If the predicted cutoff was already past
 when the first packet arrived, use that same bounded first-packet budget. The
 server pacer starts with no decode/display samples; immediately dropping every
 fragment of a late first IDR would prevent the very feedback needed to calibrate
 its predictions. This fallback allows reference recovery without an unbounded
-wait. Deadlines never extend as more packets arrive; a packet arriving after
-retirement cannot reopen the frame.
+wait. UDP deadlines never extend as more packets arrive; a packet arriving
+after retirement cannot reopen the frame.
+
+Control/TCP video packets retain their transport provenance locally, without a
+wire format change. A frame containing reliable packets has a separate 100 ms
+first-packet cap and does not use the predicted display deadline. This protects
+large recovery IDRs and codec parameter sets from the short datagram loss wait,
+which could otherwise repeatedly truncate decoder initialization. Complete
+recovery frames are still submitted immediately. This also applies in TCP-only
+mode, where the adaptive UDP budget is not used. The two-frame progress bound
+still applies. This addresses a plausible startup/reconnect failure path;
+confirm the reported Steam Frame reconnect failure with device recordings.
 
 The network loop services these deadlines even without further packets and
 rounds poll wakeups up to the nearest millisecond. Draining a buffered socket
@@ -157,8 +174,56 @@ Run the registered tests from the build tree's common and client directories:
 
 ```sh
 ctest --test-dir BUILD_DIR/common -R 'video-' --output-on-failure
-ctest --test-dir BUILD_DIR/client -R shard-accumulator --output-on-failure
+ctest --test-dir BUILD_DIR/client -R 'shard-accumulator|video-diagnostics' --output-on-failure
 ```
+
+## Client diagnostic recordings
+
+Use **Record diagnostics** on the server list, the connected application picker,
+or the streaming Statistics page. Begin before disconnecting, reproduce the
+failure and use **Stop diagnostic recording** afterwards. Recording belongs to
+the client process and continues through disconnect/lobby/reconnect. Each
+recording gets a distinct `video-<Unix nanoseconds>-<pid>-<sequence>.jsonl` file.
+The UI shows the full path, any write error and queue overflow count. Files are
+created with mode 0600; a newly created final log directory is mode 0700.
+
+On Linux/Steam Frame files go to `$XDG_STATE_HOME/wivrn/logs/`, falling back to
+`$HOME/.local/state/wivrn/logs/`. Empty or relative XDG paths are ignored, following
+the [XDG Base Directory specification](https://specifications.freedesktop.org/basedir/latest/).
+On Android they go to `logs/` under the client app's existing private files directory.
+Recording starts only through the button; it does not automatically resume on
+client process restart.
+
+JSON Lines schema 1 uses nanoseconds. The start record contains wall clock Unix
+time; subsequent events carry enqueue-time `mono_ns` and OpenXR `xr_ns` where
+available. Frame IDs are per stream and can reset after reconnect. Correlate
+using `stream_created`/`stream_destroyed` and `mono_ns`, not frame ID alone.
+Events include descriptions, decoder creation, first packets, retirement,
+submission return, decoded output, display/repeated display, network heartbeat,
+application launch requests, errors and Iris source-change/CAPTURE readiness.
+Heartbeat `state` values are 0 initializing, 1 streaming, 2 stalled, 3 shutdown;
+`xr_session_state` events carry the OpenXR session state value in `detail`.
+Heartbeat `received` is cumulative
+connection receive bytes; its `budget_ns` is the requested poll timeout.
+
+Frame retirement events contain first/retirement/display/deadline times, the
+learned UDP cap, transport, received source count, advertised minimum source
+count, intact NAL/VCL counts, completeness, attempted submission and expiry.
+`expected_min` is a lower bound if later unit descriptors never arrived.
+`detail` distinguishes `complete`, `partial`, `no_intact_slice`, `no_view` and
+`partial_unsupported`. `expired` is orthogonal: a deadline can lead to either
+partial input or a discard. `submitted` records the decision before entering
+the decoder; `decoder_submit_complete` confirms that call returned. Only a
+`decoded`/`display` event establishes later pipeline progress. Late-packet
+`received` is the shard index; display `received` is the repeat-display count.
+Empty fields in other event kinds are zero, not measured timestamps.
+
+The network/render/decoder threads enqueue bounded events to a dedicated writer
+instead of writing files. At most 4096 queued events are retained, and overflow
+is counted in the UI and final stop record. Stop drains and closes the file.
+A crash may leave the final line unfinished and omit the stop record; earlier
+complete lines remain usable. These are timing/decision logs, not packet payload
+or image dumps, nor a complete copy of the client's standard-output log.
 
 ## Client statistics overlay
 
@@ -172,8 +237,12 @@ not percentages or per-eye FPS. A partial frame also counts as incomplete, and
 expiry is a retirement reason that can overlap either partial submission or
 discard. A complete frame is not delayed just to generate a wait-time sample.
 
-Receive wait plots show mean and maximum time from the first accepted packet to
-receiver retirement for each interval. The text below the graphs shows session
+Receive wait (UDP) plots show mean and maximum time from the first accepted
+packet to receiver retirement for each interval, plus the maximum current
+adaptive cap across streams. An absolute display deadline may retire earlier.
+Reliable receive wait is plotted separately, so a recovery IDR cannot obscure
+normal datagram waits. Discard reasons count missing intact slices and codecs
+without partial decoding support. The text below the graphs shows session
 totals for incomplete frames, partial decode inputs, pre-decode discards,
 deadline retirements and late packets. These decisions do not guarantee that a
 driver outputs or displays an image; downstream decoder/render drops are not

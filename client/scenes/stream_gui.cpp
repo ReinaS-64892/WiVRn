@@ -18,6 +18,7 @@
  */
 
 #include "stream.h"
+#include "video_diagnostics.h"
 
 #include "application.h"
 #include "configuration.h"
@@ -135,8 +136,15 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	network_metric.dropped_frames = received.dropped;
 	network_metric.expired_frames = received.expired;
 	network_metric.late_video_packets = received.late_packets;
-	network_metric.receive_wait_mean = received.wait_samples ? received.wait_sum * 1e-9f / received.wait_samples : 0;
-	network_metric.receive_wait_max = received.wait_max * 1e-9f;
+	network_metric.receive_wait_mean = received.normal_wait_samples ? received.normal_wait_sum * 1e-9f / received.normal_wait_samples : 0;
+	network_metric.receive_wait_max = received.normal_wait_max * 1e-9f;
+	network_metric.reliable_wait_max = received.reliable_wait_max * 1e-9f;
+	network_metric.receive_budget = 0;
+	network_metric.no_slice = received.no_slice;
+	network_metric.partial_unsupported = received.partial_unsupported;
+	for (auto & item: decoders)
+		if (item.decoder)
+			network_metric.receive_budget = std::max(network_metric.receive_budget, item.decoder->current_receive_budget() * 1e-9f);
 
 	std::vector<shard_accumulator::blit_handle *> active_handles;
 	active_handles.reserve(blit_handles.size());
@@ -214,8 +222,13 @@ void scenes::stream::gui_performance_metrics()
 	                              {_("Discarded"), &global_metric::dropped_frames},
 	                              {_("Deadline reached"), &global_metric::expired_frames}}, "frames"),
 
-	        plot(_("Receive wait"), {{_("Mean"), &global_metric::receive_wait_mean},
-	                                {_("Maximum"), &global_metric::receive_wait_max}}, "s"),
+	        plot(_("Receive wait (UDP)"), {{_("Mean"), &global_metric::receive_wait_mean},
+	                                      {_("Maximum"), &global_metric::receive_wait_max},
+	                                      {_("Adaptive limit"), &global_metric::receive_budget}}, "s"),
+
+	        plot(_("Reliable receive wait"), {{_("Maximum"), &global_metric::reliable_wait_max}}, "s"),
+	        plot(_("Discard reasons"), {{_("No intact slice"), &global_metric::no_slice},
+	                                    {_("Partial decoding unsupported"), &global_metric::partial_unsupported}}, "frames"),
 
 	        plot(_("Late video packets"), {{"", &global_metric::late_video_packets}}, "packets"),
 	        // clang-format on
@@ -916,6 +929,15 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			ImGui::BeginChild("Main", ImVec2(ImGui::GetWindowSize().x - ImGui::GetCursorPosX() - content_margin, 0));
 			ImGui::SetCursorPosY(20);
 			wivrn::ui::page_header(_S("Statistics"), _S("Live streaming performance."));
+			if (wivrn::gui::video_recording_button())
+			{
+				std::shared_lock lock(decoder_mutex);
+				if (video_stream_description)
+				{
+					const auto & d = *video_stream_description;
+					wivrn::video_diagnostics::get().record({.kind = "video_description", .detail = fmt::format("{}x{} fps={} codec={}/{}", d.width, d.height, d.frame_rate, int(d.codec[0]), int(d.codec[1])), .xr_ns = instance.now()});
+				}
+			}
 			ImGui::BeginChild("plots", {0, 0});
 			gui_performance_metrics();
 			ImGui::EndChild();

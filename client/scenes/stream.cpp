@@ -29,6 +29,7 @@
 #define GLM_FORCE_RADIANS
 
 #include "stream.h"
+#include "video_diagnostics.h"
 
 #include "application.h"
 #include "audio/audio.h"
@@ -206,6 +207,7 @@ scenes::stream::stream(std::string server_name, scene & parent_scene) :
         apps{*this, std::move(server_name)},
         foveation_center{instance, system, session, device, commandpool, queue, swapchain_format}
 {
+	video_diagnostics::get().record({.kind = "stream_created", .xr_ns = instance.now()});
 	const auto & view = system.stereo_view();
 	width = view.recommendedImageRectWidth;
 	height = view.recommendedImageRectHeight;
@@ -604,6 +606,7 @@ void scenes::stream::on_unfocused()
 
 scenes::stream::~stream()
 {
+	video_diagnostics::get().record({.kind = "stream_destroyed", .xr_ns = instance.now()});
 	exit();
 
 	if (tracking_thread && tracking_thread->joinable())
@@ -628,6 +631,7 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			if (decoder != decoders[stream].decoder.get())
 				return;
 			handle->feedback.received_from_decoder = instance.now();
+			video_diagnostics::get().record({.kind = "decoded", .xr_ns = handle->feedback.received_from_decoder, .frame = handle->feedback.frame_index, .stream = stream, .first_ns = handle->feedback.sent_to_decoder, .wait_ns = handle->feedback.received_from_decoder - handle->feedback.sent_to_decoder, .complete = !handle->feedback.stream_corrupted});
 			if (handle->feedback.sent_to_decoder)
 				decoder->record_decode_time(handle->feedback.received_from_decoder - handle->feedback.sent_to_decoder);
 			std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
@@ -636,6 +640,7 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 		if (state_ != state::streaming and not(decoders[0].empty() or decoders[1].empty()))
 		{
 			set_state(state::streaming);
+			video_diagnostics::get().record({.kind = "stream_ready", .xr_ns = instance.now()});
 			spdlog::info("Stream scene ready at t={}", instance.now());
 		}
 	}
@@ -957,6 +962,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			set_state(state::stalled);
 		++blit_handle->feedback.times_displayed;
 		blit_handle->feedback.displayed = frame_state.predictedDisplayTime;
+		video_diagnostics::get().record({.kind = "display", .xr_ns = now, .frame = blit_handle->feedback.frame_index, .stream = blit_handle->feedback.stream_index, .first_ns = blit_handle->feedback.received_from_decoder, .display_ns = frame_state.predictedDisplayTime, .received = uint64_t(blit_handle->feedback.times_displayed), .complete = !blit_handle->feedback.stream_corrupted});
 
 		use_alpha = blit_handle->view_info.alpha;
 
@@ -1310,6 +1316,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 void scenes::stream::exit()
 {
+	if (state_ != state::shutdown)
+		video_diagnostics::get().record({.kind = "stream_exit", .xr_ns = instance.now()});
 	state_ = state::shutdown;
 }
 
@@ -1531,6 +1539,7 @@ void scenes::stream::on_xr_event(const xr::event & event)
 			});
 			break;
 		case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED:
+			video_diagnostics::get().record({.kind = "xr_session_state", .detail = std::to_string(int(event.state_changed.state)), .xr_ns = instance.now()});
 			// Override session state if the GUI is interactable
 			if (event.state_changed.state == XR_SESSION_STATE_FOCUSED and is_gui_interactable())
 				network_session->send_control(from_headset::session_state_changed{
@@ -1542,6 +1551,7 @@ void scenes::stream::on_xr_event(const xr::event & event)
 				});
 			break;
 		case XR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT:
+			video_diagnostics::get().record({.kind = "user_presence", .detail = event.user_presence_changed.isUserPresent ? "present" : "absent", .xr_ns = instance.now()});
 			if (event.user_presence_changed.isUserPresent)
 			{
 				pending_absence_time.reset();

@@ -263,7 +263,7 @@ public:
 	void operator()(to_headset::pin_check_4 &&) {};
 	void operator()(to_headset::handshake &&) {};
 	void operator()(to_headset::server_message &&);
-	void operator()(to_headset::video_stream_data_shard &&);
+	void operator()(to_headset::video_stream_data_shard &&, bool reliable = false);
 	void operator()(to_headset::haptics &&);
 	void operator()(to_headset::timesync_query &&);
 	void operator()(to_headset::tracking_control &&);
@@ -338,6 +338,10 @@ private:
 		float late_video_packets = 0;
 		float receive_wait_mean = 0;
 		float receive_wait_max = 0;
+		float reliable_wait_max = 0;
+		float receive_budget = 0;
+		float no_slice = 0;
+		float partial_unsupported = 0;
 	};
 
 	struct plot
