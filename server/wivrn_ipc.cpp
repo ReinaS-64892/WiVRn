@@ -24,6 +24,9 @@
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 #include "steamvr_lh_interface.h"
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+#include "openhouse_interface.h"
+#endif
 
 std::unique_ptr<wivrn::wivrn_connection> connection;
 
@@ -38,8 +41,13 @@ void standby_lighthouse_trackers()
 	if (steamvr_lh_standby_trackers(nullptr))
 		return;
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (openhouse_standby_trackers(nullptr))
+		return;
+#endif
+
 	send_to_main(from_monado::server_error{
 	        .where = "Turn off Lighthouse trackers",
-	        .message = "SteamVR tracked devices support is not active in this session.",
+	        .message = "Lighthouse tracker power control is not active in this session.",
 	});
 }

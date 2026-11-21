@@ -15,6 +15,12 @@ Kirigami.ScrollablePage {
 
     flickable.interactive: false // Make sure the Kirigami.ScrollablePage does not eat the vertical mouse dragging events
 
+    readonly property bool openvrLighthouseSelected:
+        (Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr") ||
+        (Settings.openhouse_supported && lighthouse_backend.currentValue === "openhouse")
+    readonly property bool lighthouseSelected: openvrLighthouseSelected ||
+        (Settings.survive_supported && lighthouse_backend.currentValue === "survive")
+
     property bool allowUpdates: false // ignore onXXX events until document is loaded
 
     ColumnLayout {
@@ -122,18 +128,32 @@ Kirigami.ScrollablePage {
                 text: i18n("Enable debug window")
                 visible: Settings.debug_gui_supported
             }
-            RowLayout {
-                visible: Settings.steamvr_lh_supported
-                Controls.CheckBox {
-                    id: steamvr_lh
-                    text: i18n("Enable SteamVR tracked devices support")
-                }
-                Kirigami.ContextualHelpButton {
-                    toolTipText: i18n("Allows the use of lighthouse-based controllers and trackers.\nRequires SteamVR to be installed.\nDevices must be be powered on before connecting to WiVRn.\nAn external tool such as motoc is needed for calibration.")
+            Controls.ComboBox {
+                id: lighthouse_backend
+                visible: Settings.steamvr_lh_supported || Settings.survive_supported || Settings.openhouse_supported
+                Layout.fillWidth: true
+                Kirigami.FormData.label: i18n("Lighthouse backend:")
+                textRole: "text"
+                valueRole: "value"
+                model: {
+                    let backends = [{text: i18n("Disabled"), value: "none"}];
+                    if (Settings.steamvr_lh_supported)
+                        backends.push({text: "SteamVR (steamvr_lh)", value: "steamvr"});
+                    if (Settings.survive_supported)
+                        backends.push({text: "libsurvive", value: "survive"});
+                    if (Settings.openhouse_supported)
+                        backends.push({text: "openhouse", value: "openhouse"});
+                    return backends;
                 }
             }
+            Controls.Label {
+                visible: lighthouse_backend.visible
+                text: i18n("Restart the internal Monado runtime to apply backend changes. SteamVR requires SteamVR to be installed. An external tool such as motoc is needed for calibration.")
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
             RowLayout {
-                visible: Settings.steamvr_lh_supported && steamvr_lh.checked
+                visible: Settings.steamvr_lh_supported && lighthouse_backend.currentValue === "steamvr"
                 Controls.CheckBox {
                     id: lh_average_relationships
                     text: i18n("Average base station relationships")
@@ -144,13 +164,13 @@ Kirigami.ScrollablePage {
             }
             Controls.CheckBox {
                 id: lighthouse_stabilization_enabled
-                visible: Settings.steamvr_lh_supported && steamvr_lh.checked
+                visible: settings.openvrLighthouseSelected
                 text: i18n("Use a base station as tracking origin (experimental)")
             }
 
             Controls.ComboBox {
                 id: lighthouse_reference_serial
-                visible: Settings.steamvr_lh_supported && steamvr_lh.checked
+                visible: settings.openvrLighthouseSelected
                 enabled: lighthouse_stabilization_enabled.checked
                 editable: true
                 Layout.fillWidth: true
@@ -159,23 +179,23 @@ Kirigami.ScrollablePage {
                 validator: RegularExpressionValidator { regularExpression: /[!-~]{0,255}/ }
             }
             Controls.Label {
-                visible: Settings.steamvr_lh_supported && steamvr_lh.checked
+                visible: settings.openvrLighthouseSelected
                 text: i18n("Select a remembered base station or enter its serial. Reconnect the headset to apply. Calibrate again after enabling or changing the reference base station.")
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
             Controls.Label {
-                visible: Settings.steamvr_lh_supported
+                visible: settings.lighthouseSelected
                 text: i18n("Lighthouse Recording")
                 font.bold: true
             }
             Controls.CheckBox {
                 id: lighthouse_recording_enabled
-                visible: Settings.steamvr_lh_supported
+                visible: settings.lighthouseSelected
                 text: i18n("Enable recording")
             }
             RowLayout {
-                visible: Settings.steamvr_lh_supported
+                visible: settings.lighthouseSelected
                 Kirigami.FormData.label: i18n("Output directory:")
                 Controls.TextField {
                     id: lighthouse_recording_output
@@ -187,39 +207,39 @@ Kirigami.ScrollablePage {
                 }
             }
             Controls.Label {
-                visible: Settings.steamvr_lh_supported
+                visible: settings.lighthouseSelected
                 text: i18n("Changes take effect the next time Monado starts.")
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
             Controls.CheckBox {
                 id: lh_max_extrapolation_enabled
-                visible: Settings.steamvr_lh_supported && steamvr_lh.checked
-                text: i18n("Clamp extrapolation for SteamVR tracked devices")
+                visible: settings.lighthouseSelected
+                text: i18n("Clamp extrapolation for Lighthouse tracked devices")
             }
             RowLayout {
-                visible: Settings.steamvr_lh_supported && steamvr_lh.checked && lh_max_extrapolation_enabled.checked
-                Kirigami.FormData.label: i18n("SteamVR max pose extrapolation")
+                visible: settings.lighthouseSelected && lh_max_extrapolation_enabled.checked
+                Kirigami.FormData.label: i18n("Lighthouse max pose extrapolation")
                 Controls.Slider {
                     id: lh_max_extrapolation
                     Layout.fillWidth: true
                     from: 0.0
                     to: 100.0
                     stepSize: 1.0
-                    value: Settings.lhMaxExtrapolation
+                    value: Settings.lhMaxExtrapolationEnabled ? Settings.lhMaxExtrapolation : 50
                 }
                 Controls.Label {
-                    text: i18ncp("value display for SteamVR max pose extrapolation", "%1ms", "%1ms", lh_max_extrapolation.value)
+                    text: i18ncp("value display for Lighthouse max pose extrapolation", "%1ms", "%1ms", lh_max_extrapolation.value)
                     Layout.preferredWidth: 35
                     Layout.alignment: Qt.AlignRight
                 }
                 Kirigami.ContextualHelpButton {
-                    toolTipText: i18n("Maximum time in milliseconds that poses may be extrapolated ahead for SteamVR tracked devices. Tune this value if you experience jittery or wobbly tracking.")
+                    toolTipText: i18n("Maximum time in milliseconds that poses may be extrapolated ahead for Lighthouse tracked devices. Tune this value if you experience jittery or wobbly tracking.")
                 }
             }
             RowLayout {
-                visible: Settings.steamvr_lh_supported && steamvr_lh.checked
-                Kirigami.FormData.label: i18n("SteamVR joystick deadzone")
+                visible: settings.openvrLighthouseSelected
+                Kirigami.FormData.label: i18n("Lighthouse joystick deadzone")
                 Controls.Slider {
                     id: lh_stick_deadzone
                     Layout.fillWidth: true
@@ -399,8 +419,9 @@ Kirigami.ScrollablePage {
         DashboardSettings.show_system_checks = show_system_checks.checked;
 
         Settings.debugGui = debug_gui.checked;
-        Settings.steamVrLh = steamvr_lh.checked;
         Settings.lhAverageRelationships = lh_average_relationships.checked;
+        if (lighthouse_backend.currentIndex >= 0)
+            Settings.lighthouseBackend = lighthouse_backend.currentValue;
         Settings.lighthouseReferenceSerial = lighthouse_stabilization_enabled.checked ? lighthouse_reference_serial.editText.trim() : "";
         Settings.lighthouseRecordingEnabled = lighthouse_recording_enabled.checked;
         Settings.lighthouseRecordingOutput = lighthouse_recording_output.text;
@@ -419,15 +440,15 @@ Kirigami.ScrollablePage {
         port_forwarding.load();
         select_game.load();
         debug_gui.checked = Settings.debugGui;
-        steamvr_lh.checked = Settings.steamVrLh;
         lh_average_relationships.checked = Settings.lhAverageRelationships;
+        lighthouse_backend.currentIndex = lighthouse_backend.indexOfValue(Settings.lighthouseBackend);
         lighthouse_stabilization_enabled.checked = Settings.lighthouseReferenceSerial.length > 0;
         lighthouse_reference_serial.currentIndex = Settings.lighthouseReferenceCandidates.indexOf(Settings.lighthouseReferenceSerial);
         lighthouse_reference_serial.editText = Settings.lighthouseReferenceSerial;
         lighthouse_recording_enabled.checked = Settings.lighthouseRecordingEnabled;
         lighthouse_recording_output.text = Settings.lighthouseRecordingOutput;
         lh_max_extrapolation_enabled.checked = Settings.lhMaxExtrapolationEnabled;
-        lh_max_extrapolation.value = Settings.lhMaxExtrapolation;
+        lh_max_extrapolation.value = Settings.lhMaxExtrapolationEnabled ? Settings.lhMaxExtrapolation : 50;
         lh_stick_deadzone.value = Settings.lhStickDeadzone;
         hid_forwarding.checked = Settings.hidForwarding;
 

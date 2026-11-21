@@ -23,3 +23,13 @@ tools/lh-recorder/lh-recorder decompress ~/LH-Archives --output ~/LH-Restored
 gzipの内容を展開してからtar.xzに最高圧縮で格納します。
 展開ツールはJSONL／pcapをgzip level 6に揃え、manifestのSHA-256を再計算します。
 元セッションは変更せず、JSONL原文とUSB payloadを保持します。
+
+libsurvive も同じ Dashboard 設定で記録できます。セッション名の `_libsurvive_`、
+manifest の `source: libsurvive`、各 pose 行の `source` / `stream` / `stage` で識別します。
+usbmon の権限は不要です。詳しくは [libsurvive の記録・比較手順](../../docs/libsurvive-recording.md)。
+
+手持ちジッターの角速度プロセス雑音 A/B と native 記録の部分文法検査は
+[比較手順](../../docs/libsurvive-handheld-jitter-ab-20261024.md)を参照。
+
+Tracker 静止拘束の比較手順は、使用していたオプションが現行libsurviveにないため削除しました。
+過去の実測記録は参考資料として残していますが、現行環境では同じ試行を実行できません。

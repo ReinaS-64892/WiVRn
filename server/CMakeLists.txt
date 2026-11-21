@@ -21,6 +21,7 @@ set(XRT_BUILD_DRIVER_RIFT_S             OFF)
 set(XRT_BUILD_DRIVER_ROKID              OFF)
 set(XRT_BUILD_DRIVER_SIMULATED          OFF)
 set(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE ${WIVRN_FEATURE_STEAMVR_LIGHTHOUSE})
+set(XRT_BUILD_DRIVER_SURVIVE            ${WIVRN_FEATURE_SURVIVE})
 set(XRT_BUILD_DRIVER_SOLARXR            ${WIVRN_FEATURE_SOLARXR})
 set(XRT_BUILD_DRIVER_TWRAP              OFF)
 set(XRT_BUILD_DRIVER_UVC                OFF)
@@ -92,7 +93,22 @@ set(XRT_IPC_MSG_SOCK_FILENAME     "wivrn/comp_ipc" CACHE STRING "Service socket 
 set(XRT_IPC_SERVICE_PID_FILENAME  "wivrn.pid"      CACHE STRING "Service pidfile filename")
 set(XRT_OXR_RUNTIME_SUFFIX        "wivrn"          CACHE STRING "OpenXR client library suffix")
 
+# The copied OpenVR host also uses Vive Pro 2 support when SteamVR is disabled.
+if(WIVRN_FEATURE_OPENHOUSE)
+    set(XRT_BUILD_DRIVER_OPENHOUSE ON)
+endif()
+if(WIVRN_FEATURE_SURVIVE)
+    add_subdirectory(survive)
+    FetchContent_GetProperties(libsurvive)
+endif()
 FetchContent_MakeAvailable(monado)
+if(WIVRN_FEATURE_OPENHOUSE AND WIVRN_BUILD_SERVER)
+    add_subdirectory(openhouse)
+endif()
+
+if(WIVRN_FEATURE_SURVIVE AND NOT TARGET drv_survive)
+	message(FATAL_ERROR "WIVRN_FEATURE_SURVIVE requires the bundled libsurvive driver")
+endif()
 
 if (WIVRN_BUILD_SERVER)
 	add_executable(wivrn-server
@@ -157,6 +173,15 @@ if (WIVRN_BUILD_SERVER)
 	if (WIVRN_FEATURE_STEAMVR_LIGHTHOUSE)
 		target_include_directories(wivrn-server SYSTEM PRIVATE ${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh/)
 		target_link_libraries(wivrn-server PRIVATE drv_steamvr_lh)
+	endif()
+
+	if(WIVRN_FEATURE_OPENHOUSE)
+		target_link_libraries(wivrn-server PRIVATE drv_openhouse)
+	endif()
+
+	if (WIVRN_FEATURE_SURVIVE)
+		target_include_directories(wivrn-server SYSTEM PRIVATE ${monado_SOURCE_DIR}/src/xrt/drivers/survive/)
+		target_link_libraries(wivrn-server PRIVATE drv_survive)
 	endif()
 
 	if (WIVRN_FEATURE_SOLARXR)
@@ -290,6 +315,7 @@ if (WIVRN_BUILD_SERVER)
 		RENAME wivrn.xml
 		DESTINATION lib/firewalld/services)
 
+	set_property(TARGET wivrn-server APPEND PROPERTY INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
 	install(TARGETS wivrn-server)
 endif()
 
@@ -349,6 +375,15 @@ if(WIVRN_BUILD_SERVER)
 		target_sources(wivrn-server PRIVATE lighthouse_capture.cpp)
 		target_link_libraries(wivrn-server PRIVATE PkgConfig::LH_PCAP ZLIB::ZLIB xrt-external-openvr)
 	endif()
+	if(WIVRN_FEATURE_SURVIVE)
+		find_package(ZLIB REQUIRED)
+		find_package(Python3 REQUIRED COMPONENTS Interpreter)
+		execute_process(COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/lh-recorder/build_provenance.py"
+			"${PROJECT_SOURCE_DIR}" "${monado_SOURCE_DIR}" "${libsurvive_SOURCE_DIR}"
+			"${CMAKE_CURRENT_BINARY_DIR}/lighthouse_build_provenance.h" COMMAND_ERROR_IS_FATAL ANY)
+		target_include_directories(wivrn-server PRIVATE "${monado_SOURCE_DIR}/src/xrt/drivers/survive" "${CMAKE_CURRENT_BINARY_DIR}")
+		target_link_libraries(wivrn-server PRIVATE drv_survive ZLIB::ZLIB)
+	endif()
 	# Offline validation, alignment and archival; recording never invokes these programs.
 	install(PROGRAMS ${PROJECT_SOURCE_DIR}/tools/lh-recorder/lh-recorder DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/wivrn)
 	configure_file(${PROJECT_SOURCE_DIR}/tools/lh-recorder/launcher.in ${CMAKE_CURRENT_BINARY_DIR}/lh-recorder-cli @ONLY)
@@ -357,6 +392,12 @@ endif()
 
 if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER)
     enable_testing()
+    add_library(wivrn-xdev-test-catch STATIC "${monado_SOURCE_DIR}/src/external/Catch2/catch_amalgamated.cpp")
+    target_include_directories(wivrn-xdev-test-catch PUBLIC "${monado_SOURCE_DIR}/src/external/Catch2")
+    target_compile_definitions(wivrn-xdev-test-catch PUBLIC CATCH_CONFIG_NO_COUNTER)
+    add_executable(lh-xdev-hotplug-test "${monado_SOURCE_DIR}/tests/tests_xdev_hotplug.cpp")
+    target_link_libraries(lh-xdev-hotplug-test PRIVATE wivrn-xdev-test-catch st_oxr aux_util xrt-interfaces xrt-external-openxr)
+    set_target_properties(lh-xdev-hotplug-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
     add_executable(quaternion-interpolation-test driver/tests/quaternion_interpolation.cpp)
     target_include_directories(quaternion-interpolation-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_BINARY_DIR}/common)
     target_link_libraries(quaternion-interpolation-test PRIVATE Eigen3::Eigen xrt-external-openxr)
@@ -377,9 +418,47 @@ if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER AND WIVRN_FEATURE_STEAMVR_LIGHTHOUSE)
         WIVRN_LH_MONADO_REV="${LH_MONADO_ACTUAL_REV}"
         WIVRN_LH_WIVRN_REV="${LH_WIVRN_REV}")
 
+    if(WIVRN_FEATURE_SURVIVE)
+        target_include_directories(lh-recording-startup-test PRIVATE "${monado_SOURCE_DIR}/src/xrt/drivers/survive" "${CMAKE_CURRENT_BINARY_DIR}")
+        target_link_libraries(lh-recording-startup-test PRIVATE drv_survive)
+    endif()
+
+    if(WIVRN_FEATURE_OPENHOUSE)
+        target_link_libraries(lh-recording-startup-test PRIVATE drv_openhouse)
+    endif()
+
+    # Test the original host's metadata exports and its retained Valve-only hook.
+    foreach(test references stabilization relationships)
+        add_executable(lh-steamvr-${test}-test "${monado_SOURCE_DIR}/tests/tests_steamvr_lh_${test}.cpp")
+        target_include_directories(lh-steamvr-${test}-test PRIVATE
+            "${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh" "${monado_SOURCE_DIR}/src/xrt/drivers")
+        target_link_libraries(lh-steamvr-${test}-test PRIVATE drv_steamvr_lh aux_util aux_math aux_vive
+            xrt-external-openvr ${CMAKE_DL_LIBS})
+        set_target_properties(lh-steamvr-${test}-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    endforeach()
+    add_library(lh-relationships-test-driver SHARED "${monado_SOURCE_DIR}/tests/tests_steamvr_lh_relationship_driver.cpp")
+    set_target_properties(lh-relationships-test-driver PROPERTIES PREFIX "" OUTPUT_NAME "driver_lighthouse"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/mock-provider")
+    target_compile_options(lh-relationships-test-driver PRIVATE -O0 -fno-omit-frame-pointer)
+    add_dependencies(lh-steamvr-relationships-test lh-relationships-test-driver)
+
     add_executable(lh-hotplug-test ../tools/lh-recorder/tests/hotplug.cpp)
     target_compile_features(lh-hotplug-test PRIVATE cxx_std_20)
     set_target_properties(lh-hotplug-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
     target_include_directories(lh-hotplug-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${monado_SOURCE_DIR}/src/xrt/drivers/steamvr_lh ${monado_SOURCE_DIR}/src/xrt/drivers ${monado_SOURCE_DIR}/src/xrt/base)
     target_link_libraries(lh-hotplug-test PRIVATE drv_steamvr_lh xrt-external-openvr aux_util xrt-interfaces base wivrn-common wivrn-external)
+endif()
+
+if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER AND WIVRN_FEATURE_SURVIVE)
+    add_executable(lh-survive-hotplug-test ../tools/lh-recorder/tests/survive_hotplug.cpp)
+    set_target_properties(lh-survive-hotplug-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    target_include_directories(lh-survive-hotplug-test PRIVATE ${monado_SOURCE_DIR}/src/xrt/drivers/survive ${monado_SOURCE_DIR}/src/xrt/drivers)
+    target_link_libraries(lh-survive-hotplug-test PRIVATE drv_survive aux_util xrt-interfaces wivrn-survive)
+endif()
+
+if(WIVRN_BUILD_TEST AND WIVRN_BUILD_SERVER)
+    add_executable(lh-backend-test ../tools/lh-recorder/tests/lighthouse_backend_test.cpp driver/configuration.cpp hostname.cpp)
+    set_target_properties(lh-backend-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    target_include_directories(lh-backend-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(lh-backend-test PRIVATE wivrn-common wivrn-common-base aux_util nlohmann_json::nlohmann_json PkgConfig::glib2)
 endif()

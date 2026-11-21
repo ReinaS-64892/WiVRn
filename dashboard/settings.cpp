@@ -17,6 +17,7 @@
  */
 
 #include "settings.h"
+#include "lighthouse_backend.h"
 #include "lighthouse_recording_defaults.h"
 #include "lighthouse_reference_settings.h"
 #include <QUrl>
@@ -128,6 +129,9 @@ void Settings::emitAllChanged()
 	openvrChanged();
 	debugGuiChanged();
 	steamVrLhChanged();
+	useSurviveChanged();
+	useOpenhouseChanged();
+	lighthouseBackendChanged();
 	lighthouseRecordingEnabledChanged();
 	lighthouseRecordingOutputChanged();
 	lighthouseReferenceSerialChanged();
@@ -429,10 +433,92 @@ bool Settings::steamVrLh() const
 
 void Settings::set_steamVrLh(const bool & value)
 {
-	auto old = steamVrLh();
-	m_jsonSettings["use-steamvr-lh"] = value;
-	if (old != value)
+	if (value)
+		set_lighthouseBackend("steamvr");
+	else if (steamVrLh())
+	{
+		m_jsonSettings["use-steamvr-lh"] = false;
 		steamVrLhChanged();
+		lighthouseBackendChanged();
+	}
+}
+
+bool Settings::useSurvive() const
+{
+	auto it = m_jsonSettings.find("use-survive");
+	return it != m_jsonSettings.end() && it->is_boolean() && it->get<bool>();
+}
+
+void Settings::set_useSurvive(const bool & value)
+{
+	if (value)
+		set_lighthouseBackend("survive");
+	else if (useSurvive())
+	{
+		m_jsonSettings["use-survive"] = false;
+		useSurviveChanged();
+		lighthouseBackendChanged();
+	}
+}
+
+bool Settings::useOpenhouse() const
+{
+	auto it = m_jsonSettings.find("use-openhouse");
+	return it != m_jsonSettings.end() && it->is_boolean() && it->get<bool>();
+}
+
+void Settings::set_useOpenhouse(const bool & value)
+{
+	if (value)
+		set_lighthouseBackend("openhouse");
+	else if (useOpenhouse())
+	{
+		m_jsonSettings["use-openhouse"] = false;
+		useOpenhouseChanged();
+		lighthouseBackendChanged();
+	}
+}
+
+bool Settings::openhouse() const
+{
+	return WIVRN_FEATURE_OPENHOUSE;
+}
+
+QString Settings::lighthouseBackend() const
+{
+	switch (wivrn::select_lighthouse_backend(steamVrLh(), useSurvive(), true, true, useOpenhouse(), true))
+	{
+		case wivrn::lighthouse_backend::steamvr: return "steamvr";
+		case wivrn::lighthouse_backend::survive: return "survive";
+		case wivrn::lighthouse_backend::openhouse: return "openhouse";
+		default: return "none";
+	}
+}
+
+void Settings::set_lighthouseBackend(const QString & value)
+{
+	if (value != "none" && value != "steamvr" && value != "survive" && value != "openhouse")
+		return;
+	auto old_backend = lighthouseBackend();
+	auto old_steamvr = steamVrLh();
+	auto old_survive = useSurvive();
+	auto old_openhouse = useOpenhouse();
+	m_jsonSettings["use-steamvr-lh"] = value == "steamvr";
+	m_jsonSettings["use-survive"] = value == "survive";
+	m_jsonSettings["use-openhouse"] = value == "openhouse";
+	if (old_steamvr != steamVrLh())
+		steamVrLhChanged();
+	if (old_survive != useSurvive())
+		useSurviveChanged();
+	if (old_openhouse != useOpenhouse())
+		useOpenhouseChanged();
+	if (old_backend != lighthouseBackend())
+		lighthouseBackendChanged();
+}
+
+bool Settings::survive() const
+{
+	return WIVRN_FEATURE_SURVIVE;
 }
 
 QString Settings::lighthouseReferenceSerial() const
@@ -523,33 +609,31 @@ QString Settings::recordingDirectoryFromUrl(const QUrl & url) const
 
 bool Settings::lhMaxExtrapolationEnabled() const
 {
-	auto it = m_jsonSettings.find("lh-max-extrapolation");
-	return it != m_jsonSettings.end() and it->is_number();
+	return lhMaxExtrapolation() >= 0;
 }
 
 int64_t Settings::lhMaxExtrapolation() const
 {
 	auto it = m_jsonSettings.find("lh-max-extrapolation");
-	if (it != m_jsonSettings.end() and it->is_number())
-		return static_cast<int64_t>(*it);
+	if (it != m_jsonSettings.end() && it->is_number_integer())
+	{
+		auto value = it->get<int64_t>();
+		if (value >= -1)
+			return value;
+	}
 	return 50;
 }
 
 void Settings::set_lhMaxExtrapolation(const int64_t & value)
 {
+	if (value < -1)
+		return;
 	auto old = lhMaxExtrapolation();
-	if (value != -1)
-	{
-		m_jsonSettings["lh-max-extrapolation"] = value;
-	}
-	else
-	{
-		m_jsonSettings.erase("lh-max-extrapolation");
-	}
-
+	m_jsonSettings["lh-max-extrapolation"] = value;
 	if (old != value)
 	{
-		lhMaxExtrapolationEnabledChanged();
+		if ((old >= 0) != (value >= 0))
+			lhMaxExtrapolationEnabledChanged();
 		lhMaxExtrapolationChanged();
 	}
 }
@@ -740,9 +824,12 @@ void Settings::restore_defaults()
 	m_jsonSettings.erase("hid-forwarding");
 	m_jsonSettings.erase("debug-gui");
 	m_jsonSettings.erase("use-steamvr-lh");
+	m_jsonSettings.erase("use-survive");
+	m_jsonSettings.erase("use-openhouse");
 	m_jsonSettings.erase("lighthouse-recording");
 	m_jsonSettings.erase("lh-average-relationships");
 	m_jsonSettings.erase("lh-stick-deadzone");
+	m_jsonSettings.erase("lh-max-extrapolation");
 	m_jsonSettings.erase("port-forwarding");
 	m_jsonSettings.erase("port-forwarding-port");
 	m_jsonSettings.erase("tcp-only");

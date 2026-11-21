@@ -64,6 +64,13 @@
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 #include "steamvr_lh_interface.h"
 #endif
+#if WIVRN_FEATURE_OPENHOUSE
+#include "openhouse_interface.h"
+#endif
+
+#if WIVRN_FEATURE_SURVIVE
+#include "survive_interface.h"
+#endif
 
 #if WIVRN_FEATURE_SOLARXR
 #include "solarxr_interface.h"
@@ -140,18 +147,17 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	static_xdevs[static_xdev_count++] = &gamepad_device.emplace(*this);
 
 	auto conf = configuration();
+	lighthouse_backend_choice = conf.selected_lighthouse_backend();
+	if (lighthouse_backend_choice != lighthouse_backend::none && conf.lh_max_extrapolation.has_value())
+		setenv("LH_MAX_EXTRAPOLATION_MS", std::format("{}", *conf.lh_max_extrapolation).c_str(), true);
 
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 
-	auto use_steamvr_lh = conf.use_steamvr_lh || std::getenv("WIVRN_USE_STEAMVR_LH");
-
-	if (use_steamvr_lh)
+	if (lighthouse_backend_choice == lighthouse_backend::steamvr)
 	{
 		if (conf.lh_stick_deadzone > 0.01f)
 			setenv("LH_STICK_DEADZONE", std::format("{:.2}", *conf.lh_stick_deadzone).c_str(), true);
 
-		if (conf.lh_max_extrapolation.has_value())
-			setenv("LH_MAX_EXTRAPOLATION_MS", std::format("{}", *conf.lh_max_extrapolation).c_str(), true);
 
 		U_LOG_W("=====================");
 		U_LOG_W("Disregard lighthousedb / chaperone related error messages from the lighthouse driver. These are irrelevant in case of WiVRn.");
@@ -160,6 +166,18 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 		lighthouse_enabled = steamvr_lh_create_devices(nullptr, this) == XRT_SUCCESS;
 	}
 #endif
+
+#if WIVRN_FEATURE_OPENHOUSE
+	if (lighthouse_backend_choice == lighthouse_backend::openhouse)
+	{
+		if (conf.lh_stick_deadzone > 0.01f)
+			setenv("LH_STICK_DEADZONE", std::format("{:.2}", *conf.lh_stick_deadzone).c_str(), true);
+		openhouse_enabled = openhouse_create_devices(nullptr, this) == XRT_SUCCESS;
+		if (!openhouse_enabled)
+			U_LOG_W("Failed to initialize openhouse backend");
+	}
+#endif
+
 	if (get_info().eye_gaze || is_forced_extension("EXT_eye_gaze_interaction"))
 	{
 		// The tracker space needs to be attached to the head pose once the space overseer is created
@@ -253,9 +271,16 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 
 wivrn_session::~wivrn_session()
 {
+#if WIVRN_FEATURE_SURVIVE
+	survive_stop(survive);
+#endif
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 	if (lighthouse_enabled)
 		steamvr_lh_stop(this);
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (openhouse_enabled)
+		openhouse_stop(this);
 #endif
 #if WIVRN_FEATURE_SOLARXR
 	solarxr_device_clear_feeder_devices(static_roles.body);
@@ -267,6 +292,9 @@ wivrn_session::~wivrn_session()
 	}
 
 	connection->shutdown();
+#if WIVRN_FEATURE_SURVIVE
+	survive_destroy(survive);
+#endif
 }
 
 xrt_result_t wivrn::wivrn_session::create_session(std::unique_ptr<wivrn_connection> connection,
@@ -298,6 +326,15 @@ xrt_result_t wivrn::wivrn_session::create_session(std::unique_ptr<wivrn_connecti
 	}
 	self->system_compositor = *out_xsysc;
 
+#if WIVRN_FEATURE_SURVIVE
+	if (self->lighthouse_backend_choice == lighthouse_backend::survive)
+	{
+		self->survive = survive_create_devices(self.get());
+		if (self->survive == nullptr)
+			U_LOG_W("Failed to initialize libsurvive backend");
+	}
+#endif
+
 	struct xrt_pose t_stage_local = XRT_POSE_IDENTITY;
 	t_stage_local.position.y = 1.6;
 
@@ -315,9 +352,16 @@ xrt_result_t wivrn::wivrn_session::create_session(std::unique_ptr<wivrn_connecti
 	        false,
 	        out_xspovrs);
 	self->space_overseer = *out_xspovrs;
+#if WIVRN_FEATURE_SURVIVE
+	survive_start(self->survive, &wivrn_session::lighthouse_device_added, self.get());
+#endif
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 	if (self->lighthouse_enabled)
 		steamvr_lh_set_device_added_callback(self.get(), &wivrn_session::lighthouse_device_added, self.get());
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (self->openhouse_enabled)
+		openhouse_set_device_added_callback(self.get(), &wivrn_session::lighthouse_device_added, self.get());
 #endif
 
 	if (self->eye_tracker)
@@ -350,9 +394,16 @@ void wivrn_session::start(ipc_server * server)
 
 void wivrn_session::stop()
 {
+#if WIVRN_FEATURE_SURVIVE
+	survive_stop(survive);
+#endif
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 	if (lighthouse_enabled)
 		steamvr_lh_stop(this);
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (openhouse_enabled)
+		openhouse_stop(this);
 #endif
 	net_thread = std::jthread();
 	worker_thread = std::jthread();
@@ -1425,9 +1476,16 @@ xrt_result_t wivrn_session::create_hand_tracker(const xrt_hand_tracker_create_in
 xrt_result_t wivrn_session::get_roles(xrt_system_roles * out_roles)
 {
 	xrt_system_roles lighthouse_roles = XRT_SYSTEM_ROLES_INIT;
+#if WIVRN_FEATURE_SURVIVE
+	survive_get_roles(survive, &lighthouse_roles);
+#endif
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 	if (lighthouse_enabled)
 		steamvr_lh_get_roles(this, &lighthouse_roles);
+#endif
+#if WIVRN_FEATURE_OPENHOUSE
+	if (openhouse_enabled)
+		openhouse_get_roles(this, &lighthouse_roles);
 #endif
 	std::lock_guard lock(roles_mutex);
 	auto selected = roles;
