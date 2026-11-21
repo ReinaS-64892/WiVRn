@@ -21,6 +21,8 @@
 #include "scenes/stream.h" // IWYU pragma: keep
 #include "spdlog/spdlog.h"
 #include "xr/instance.h"
+#include <algorithm>
+#include <cmath>
 
 namespace wivrn
 {
@@ -37,6 +39,7 @@ shard_set::shard_set(uint8_t stream_index)
 void shard_set::reset(uint64_t frame_index)
 {
 	data.clear();
+	deadline.reset();
 
 	uint8_t stream_index = feedback.stream_index;
 	feedback = {};
@@ -62,14 +65,26 @@ static bool is_complete(const shard_set & shards)
 	return true;
 }
 
-std::optional<uint16_t> shard_set::insert(data_shard && shard, xr::instance & instance)
+std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDuration max_wait, XrDuration reserve)
 {
 	// A source symbol must belong to the range advertised by its unit.
 	const auto & unit = shard.unit;
 	if (!valid_video_symbol(unit, shard.shard_idx, shard.payload.size()))
 		return {};
 	if (empty())
-		feedback.received_first_packet = instance.now();
+	{
+		feedback.received_first_packet = now;
+		deadline = now + max_wait;
+	}
+	if (shard.view_info && shard.view_info->display_time > 0)
+	{
+		const auto predicted_deadline = shard.view_info->display_time - reserve;
+		// The server pacer starts without decoded/displayed timing samples.
+		// An already-unusable prediction must not discard every fragment of the
+		// first IDR and prevent the feedback needed to calibrate that pacer.
+		if (predicted_deadline > feedback.received_first_packet)
+			deadline = std::min(*deadline, predicted_deadline);
+	}
 
 	auto idx = shard.shard_idx;
 	if (idx >= data.size())
@@ -80,22 +95,84 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, xr::instance & in
 	return idx;
 }
 
-static void debug_why_not_sent(const shard_set & shards)
+shard_accumulator::statistics & shard_accumulator::statistics::operator+=(const statistics & other)
+{
+	complete += other.complete;
+	incomplete += other.incomplete;
+	partial += other.partial;
+	dropped += other.dropped;
+	expired += other.expired;
+	late_packets += other.late_packets;
+	unobserved_frames += other.unobserved_frames;
+	wait_samples += other.wait_samples;
+	wait_sum += other.wait_sum;
+	wait_max = std::max(wait_max, other.wait_max);
+	return *this;
+}
+
+XrDuration shard_accumulator::receive_budget(float frame_rate)
+{
+	if (!std::isfinite(frame_rate) || frame_rate <= 0)
+		frame_rate = 90;
+	return std::clamp<XrDuration>(1e9 / std::max(1.f, frame_rate), 2'000'000, 20'000'000);
+}
+
+void shard_accumulator::record_decode_time(XrDuration duration)
+{
+	if (duration <= 0)
+		return;
+	// Follow increases promptly; decay slowly so one fast picture cannot erase
+	// the headroom measured on a slower hardware decode or its queue.
+	const auto sample = std::clamp<XrDuration>(duration, 1'000'000, 16'000'000);
+	auto previous = decode_budget.load(std::memory_order_relaxed);
+	while (!decode_budget.compare_exchange_weak(previous, std::max(sample * 5 / 4, previous * 99 / 100), std::memory_order_relaxed))
+	{
+	}
+}
+
+shard_accumulator::statistics shard_accumulator::take_statistics()
+{
+	std::lock_guard lock(statistics_mutex);
+	return std::exchange(pending_statistics, {});
+}
+
+std::optional<XrTime> shard_accumulator::next_deadline() const
+{
+	if (!current.deadline)
+		return next.deadline;
+	if (!next.deadline)
+		return current.deadline;
+	return std::min(*current.deadline, *next.deadline);
+}
+
+void shard_accumulator::expire(XrTime now)
+{
+	// There are at most two observed frames. Empty placeholders have no timer,
+	// but must advance when an observed successor reaches its deadline.
+	while (auto deadline = next_deadline())
+	{
+		if (now < *deadline)
+			break;
+		finish_current(true);
+		advance();
+		try_submit_frame();
+	}
+}
+
+static void debug_incomplete_frame(const shard_set & shards)
 {
 	const auto & frame = shards.data;
 	if (frame.empty())
 	{
-		spdlog::info("frame {} was not sent because no shard was received", shards.frame_index());
+		spdlog::debug("frame {} has no received shards", shards.frame_index());
 		return;
 	}
-	int frame_idx = -1;
 	size_t data = 0;
 	size_t missing = 0;
 	for (const auto & shard: frame)
 	{
 		if (shard)
 		{
-			frame_idx = shard->frame_idx;
 			++data;
 		}
 		else
@@ -103,7 +180,7 @@ static void debug_why_not_sent(const shard_set & shards)
 	}
 
 	bool end = frame.back() and frame.back()->timing_info;
-	spdlog::info("frame {} was not sent with {} data shards, {}{} missing", frame_idx, data, end ? "" : "at least ", missing);
+	spdlog::debug("frame {} is incomplete with {} data shards, {}{} missing", shards.frame_index(), data, end ? "" : "at least ", missing);
 }
 
 void shard_accumulator::advance()
@@ -115,21 +192,33 @@ void shard_accumulator::advance()
 void shard_accumulator::push_shard(video_stream_data_shard && shard)
 {
 	assert(current.frame_index() + 1 == next.frame_index());
+	if (!valid_video_symbol(shard.unit, shard.shard_idx, shard.payload.size()))
+		return;
+	if (!started)
+	{
+		current.reset(shard.frame_idx);
+		next.reset(shard.frame_idx + 1);
+		started = true;
+	}
+	const auto now = instance.now();
+	expire(now);
+	const auto reserve = decode_budget.load(std::memory_order_relaxed) + 2'000'000; // render/submit headroom
 
 	auto frame_diff = shard.frame_idx - current.frame_index();
 	if (shard.frame_idx < current.frame_index())
 	{
 		// frame is in the past, drop it
-		spdlog::info("Drop shard for old frame {} (current {})", shard.frame_idx, current.frame_index());
+		std::lock_guard lock(statistics_mutex);
+		++pending_statistics.late_packets;
 	}
 	else if (frame_diff == 0)
 	{
-		if (current.insert(std::move(shard), instance))
+		if (current.insert(std::move(shard), now, max_wait, reserve))
 			try_submit_frame();
 	}
 	else if (frame_diff == 1)
 	{
-		next.insert(std::move(shard), instance);
+		next.insert(std::move(shard), now, max_wait, reserve);
 		if (is_complete(next))
 		{
 			finish_current();
@@ -150,12 +239,17 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 		finish_current();
 		advance();
 		finish_current();
+		{
+			std::lock_guard lock(statistics_mutex);
+			pending_statistics.unobserved_frames += frame_diff - 2;
+		}
 
 		current.reset(shard.frame_idx);
 		next.reset(shard.frame_idx + 1);
 
 		push_shard(std::move(shard));
 	}
+	expire(now);
 }
 
 void shard_accumulator::try_submit_frame()
@@ -173,12 +267,22 @@ void shard_accumulator::try_submit_frame()
 	}
 }
 
-void shard_accumulator::finish_current()
+void shard_accumulator::finish_current(bool expired)
 {
+	const auto now = instance.now();
+	if (current.empty())
+	{
+		{
+			std::lock_guard lock(statistics_mutex);
+			++pending_statistics.unobserved_frames;
+		}
+		send_feedback(current.feedback);
+		return;
+	}
 	auto payload = complete_video_units(current.data);
 	const bool complete = is_complete(current) && payload.spans.size() == current.data.size();
 	if (!complete)
-		debug_why_not_sent(current);
+		debug_incomplete_frame(current);
 
 	std::optional<data_shard::view_info_t> view;
 	for (const auto & shard: current.data)
@@ -198,11 +302,24 @@ void shard_accumulator::finish_current()
 	}
 	current.feedback.stream_corrupted = !complete;
 	if (complete)
-		current.feedback.received_last_packet = instance.now();
+		current.feedback.received_last_packet = now;
 
-	if (view && !payload.spans.empty() && (complete || (allow_partial && payload.has_vcl)))
+	const bool submit = view && !payload.spans.empty() && (complete || (allow_partial && payload.has_vcl));
 	{
-		current.feedback.sent_to_decoder = instance.now();
+		std::lock_guard lock(statistics_mutex);
+		pending_statistics.complete += complete;
+		pending_statistics.incomplete += !complete;
+		pending_statistics.partial += submit && !complete;
+		pending_statistics.dropped += !submit;
+		pending_statistics.expired += expired;
+		const auto wait = std::max<XrDuration>(0, now - current.feedback.received_first_packet);
+		++pending_statistics.wait_samples;
+		pending_statistics.wait_sum += wait;
+		pending_statistics.wait_max = std::max(pending_statistics.wait_max, wait);
+	}
+	if (submit)
+	{
+		current.feedback.sent_to_decoder = now;
 		decoder_->push_data(payload.spans, current.frame_index(), false);
 		decoder_->frame_completed(current.feedback, *view);
 	}

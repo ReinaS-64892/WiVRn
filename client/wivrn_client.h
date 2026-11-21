@@ -85,10 +85,21 @@ public:
 		fds[1].events = POLLIN;
 		fds[1].fd = control.get_fd();
 
+		bool received_pending = false;
 		while (auto packet = stream.receive_pending(&bytes_received_))
+		{
 			std::visit(std::forward<T>(visitor), std::move(*packet));
+			received_pending = true;
+		}
 		while (auto packet = control.receive_pending(&bytes_received_))
+		{
 			std::visit(std::forward<T>(visitor), std::move(*packet));
+			received_pending = true;
+		}
+		// Visitors may have armed a video deadline while draining a batch. Let
+		// the caller recompute its timeout instead of blocking with a stale one.
+		if (received_pending)
+			return 1;
 
 		int r = ::poll(fds, std::size(fds), timeout.count());
 		if (r < 0)

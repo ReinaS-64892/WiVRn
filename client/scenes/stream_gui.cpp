@@ -52,6 +52,8 @@ float compute_plot_max_value(float * data, int count, ptrdiff_t stride)
 	{
 		max = std::max(max, *(float *)(ptr + i * stride));
 	}
+	if (!(max > 0) || !std::isfinite(max))
+		return 0;
 
 	// First power of 10 less than the max
 	float x = pow(10, floor(log10(max)));
@@ -120,6 +122,22 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	global_metrics[metrics_offset].bandwidth_rx = bandwidth_rx * 8;
 	global_metrics[metrics_offset].bandwidth_tx = bandwidth_tx * 8;
 
+	// Receiver counters do not depend on a decoded/displayed handle, so a
+	// completely discarded frame remains visible in the loss graphs.
+	shard_accumulator::statistics received;
+	for (auto & item: decoders)
+		if (item.decoder)
+			received += item.decoder->take_statistics();
+	video_receive_totals += received;
+	auto & network_metric = global_metrics[metrics_offset];
+	network_metric.incomplete_frames = received.incomplete;
+	network_metric.partial_frames = received.partial;
+	network_metric.dropped_frames = received.dropped;
+	network_metric.expired_frames = received.expired;
+	network_metric.late_video_packets = received.late_packets;
+	network_metric.receive_wait_mean = received.wait_samples ? received.wait_sum * 1e-9f / received.wait_samples : 0;
+	network_metric.receive_wait_max = received.wait_max * 1e-9f;
+
 	std::vector<shard_accumulator::blit_handle *> active_handles;
 	active_handles.reserve(blit_handles.size());
 	for (const auto & h: blit_handles)
@@ -131,12 +149,22 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	if (decoder_metrics.size() != active_handles.size())
 		decoder_metrics.resize(active_handles.size());
 
-	auto min_encode_begin = std::numeric_limits<decltype(active_handles[0]->feedback.encode_begin)>::max();
+	auto min_encode_begin = std::numeric_limits<XrTime>::max();
 	for (const auto & bh: active_handles)
 	{
-		if (bh)
+		if (bh->feedback.encode_begin > 0)
 			min_encode_begin = std::min(min_encode_begin, bh->feedback.encode_begin);
 	}
+	if (min_encode_begin == std::numeric_limits<XrTime>::max())
+	{
+		min_encode_begin = predicted_display_time;
+		for (const auto & bh: active_handles)
+			if (bh->feedback.received_first_packet > 0)
+				min_encode_begin = std::min(min_encode_begin, bh->feedback.received_first_packet);
+	}
+	auto relative_time = [min_encode_begin](XrTime time) {
+		return time > 0 ? (time - min_encode_begin) * 1e-9f : std::numeric_limits<float>::quiet_NaN();
+	};
 
 	for (auto && [metrics, bh]: std::views::zip(decoder_metrics, active_handles))
 	{
@@ -147,17 +175,17 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 
 		// clang-format off
 		metrics[metrics_offset] = bh ? decoder_metric{
-			.encode_begin          = (bh->feedback.encode_begin          - min_encode_begin) * 1e-9f,
-			.encode_end            = (bh->feedback.encode_end            - min_encode_begin) * 1e-9f,
-			.send_begin            = (bh->feedback.send_begin            - min_encode_begin) * 1e-9f,
-			.send_end              = (bh->feedback.send_end              - min_encode_begin) * 1e-9f,
-			.received_first_packet = (bh->feedback.received_first_packet - min_encode_begin) * 1e-9f,
-			.received_last_packet  = (bh->feedback.received_last_packet  - min_encode_begin) * 1e-9f,
-			.sent_to_decoder       = (bh->feedback.sent_to_decoder       - min_encode_begin) * 1e-9f,
-			.received_from_decoder = (bh->feedback.received_from_decoder - min_encode_begin) * 1e-9f,
-			.blitted               = (bh->feedback.blitted               - min_encode_begin) * 1e-9f,
-			.displayed             = (bh->feedback.displayed             - min_encode_begin) * 1e-9f,
-			.predicted_display     = (bh->view_info.display_time         - min_encode_begin) * 1e-9f,
+			.encode_begin          = relative_time(bh->feedback.encode_begin),
+			.encode_end            = relative_time(bh->feedback.encode_end),
+			.send_begin            = relative_time(bh->feedback.send_begin),
+			.send_end              = relative_time(bh->feedback.send_end),
+			.received_first_packet = relative_time(bh->feedback.received_first_packet),
+			.received_last_packet  = relative_time(bh->feedback.received_last_packet),
+			.sent_to_decoder       = relative_time(bh->feedback.sent_to_decoder),
+			.received_from_decoder = relative_time(bh->feedback.received_from_decoder),
+			.blitted               = relative_time(bh->feedback.blitted),
+			.displayed             = relative_time(bh->feedback.displayed),
+			.predicted_display     = relative_time(bh->view_info.display_time),
 		}: decoder_metric{};
 		// clang-format on
 	}
@@ -180,6 +208,16 @@ void scenes::stream::gui_performance_metrics()
 
 	        plot(_("Network"), {{_("Download"),  &global_metric::bandwidth_rx},
 	                            {_("Upload"),    &global_metric::bandwidth_tx}}, "bit/s"),
+
+	        plot(_("Video loss"), {{_("Incomplete"), &global_metric::incomplete_frames},
+	                              {_("Partial decode input"), &global_metric::partial_frames},
+	                              {_("Discarded"), &global_metric::dropped_frames},
+	                              {_("Deadline reached"), &global_metric::expired_frames}}, "frames"),
+
+	        plot(_("Receive wait"), {{_("Mean"), &global_metric::receive_wait_mean},
+	                                {_("Maximum"), &global_metric::receive_wait_max}}, "s"),
+
+	        plot(_("Late video packets"), {{"", &global_metric::late_video_packets}}, "packets"),
 	        // clang-format on
 	};
 
@@ -191,7 +229,7 @@ void scenes::stream::gui_performance_metrics()
 
 	ImVec2 plot_size = ImVec2(
 	        window_size.x / n_cols - style.ItemSpacing.x * (n_cols - 1) / n_cols,
-	        (window_size.y - 2 * ImGui::GetCurrentContext()->FontSize - 2 * style.ItemSpacing.y) / n_rows - style.ItemSpacing.y * (n_rows - 1) / n_rows);
+	        std::max(100.f, (window_size.y - 5 * ImGui::GetCurrentContext()->FontSize - 5 * style.ItemSpacing.y) / n_rows - style.ItemSpacing.y * (n_rows - 1) / n_rows));
 
 	ImPlot::PushStyleColor(ImPlotCol_PlotBg, ImVec4{t.background.x, t.background.y, t.background.z, 0.8f});
 	ImPlot::PushStyleColor(ImPlotCol_PlotBorder, t.border);
@@ -213,26 +251,27 @@ void scenes::stream::gui_performance_metrics()
 			{
 				max_v = std::max(max_v, compute_plot_max_value(&(global_metrics.data()->*data), global_metrics.size(), sizeof(global_metric)));
 			}
+			if (max_v <= 0)
+				max_v = std::string_view(unit) == "s" ? 0.001f : 1.f;
 			auto [multiplier, prefix] = compute_plot_unit(max_v);
 
 			if (axis_scale[n] == 0 || std::isnan(axis_scale[n]))
 				axis_scale[n] = max_v;
 			else
-				axis_scale[n] = 0.99 * axis_scale[n] + 0.01 * max_v;
-
-			auto color = ImPlot::GetColormapColor(n);
+				axis_scale[n] = std::max(max_v, 0.99f * axis_scale[n]);
 
 			std::string title_with_units = std::string(title) + " [" + prefix + unit + "]";
 			ImPlot::SetupAxes(nullptr, title_with_units.c_str(), ImPlotAxisFlags_NoDecorations, 0);
 			ImPlot::SetupAxesLimits(0, global_metrics.size() - 1, min_v * multiplier, axis_scale[n] * multiplier, ImGuiCond_Always);
 			ImPlotSpec spec;
-			spec.LineColor = color;
-			spec.FillColor = color;
 			spec.FillAlpha = 0.25;
 			spec.Flags = ImPlotLineFlags_Shaded;
 
+			int series = 0;
 			for (const auto & [subtitle, data]: subplots)
 			{
+				spec.LineColor = ImPlot::GetColormapColor(series++);
+				spec.FillColor = spec.LineColor;
 				getter_data gdata{
 				        .data = (uintptr_t)&(global_metrics.data()->*data),
 				        .stride = sizeof(global_metric),
@@ -240,11 +279,10 @@ void scenes::stream::gui_performance_metrics()
 				};
 				ImPlot::PlotLineG(subtitle.c_str(), getter, &gdata, global_metrics.size(), spec);
 
-				double x[] = {double(metrics_offset), double(metrics_offset)};
-				double y[] = {0, axis_scale[n] * multiplier};
-				spec.LineColor = ImVec4(1, 1, 1, 1);
-				ImPlot::PlotLine("", x, y, 2, spec);
 			}
+			double x[] = {double(metrics_offset), double(metrics_offset)};
+			double y[] = {0, axis_scale[n] * multiplier};
+			ImPlot::PlotLine("", x, y, 2, {ImPlotProp_LineColor, ImVec4(1, 1, 1, 1)});
 			ImPlot::EndPlot();
 		}
 
@@ -258,7 +296,7 @@ void scenes::stream::gui_performance_metrics()
 		if (ImPlot::BeginPlot(title.c_str(), plot_size, ImPlotFlags_NoTitle | ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText))
 		{
 			float min_v = 0;
-			float max_v = compute_plot_max_value(&(metrics.data()->displayed), metrics.size(), sizeof(decoder_metric));
+			float max_v = std::max(0.001f, compute_plot_max_value(&(metrics.data()->displayed), metrics.size(), sizeof(decoder_metric)));
 			// auto [ multiplier, prefix ] = compute_plot_unit(max_v);
 
 			if (axis_scale[n] == 0)
@@ -348,6 +386,15 @@ void scenes::stream::gui_performance_metrics()
 
 	ImPlot::PopStyleColor(8);
 	{
+		ImGui::TextUnformatted(fmt::format(_F("Video reception: incomplete {}, partial {}, discarded {}, deadline {}, late packets {}"),
+		                                   video_receive_totals.incomplete,
+		                                   video_receive_totals.partial,
+		                                   video_receive_totals.dropped,
+		                                   video_receive_totals.expired,
+		                                   video_receive_totals.late_packets)
+		                               .c_str());
+		ImGui::TextUnformatted(_S("Video counts cover all streams per display interval. Partial means submitted, not necessarily displayed."));
+		ImGui::TextUnformatted(fmt::format(_F("Unobserved frame IDs: {} (may include frames skipped by the server)"), video_receive_totals.unobserved_frames).c_str());
 		ImGui::TextUnformatted(
 		        fmt::format(
 		                _F("Estimated motion to photons latency: {}ms"),

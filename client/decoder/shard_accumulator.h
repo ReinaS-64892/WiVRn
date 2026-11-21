@@ -22,7 +22,9 @@
 #include "decoder.h"
 #include "wivrn_packets.h"
 
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 #include <vulkan/vulkan_raii.hpp>
@@ -43,16 +45,18 @@ namespace wivrn
 class shard_accumulator
 {
 	std::shared_ptr<decoder> decoder_;
+	bool started = false;
 
 public:
 	using data_shard = wivrn::to_headset::video_stream_data_shard;
 	struct shard_set
 	{
 		std::vector<std::optional<data_shard>> data;
+		std::optional<XrTime> deadline;
 		void reset(uint64_t frame_index);
 		bool empty() const;
 
-		std::optional<uint16_t> insert(data_shard &&, xr::instance & instance);
+		std::optional<uint16_t> insert(data_shard &&, XrTime now, XrDuration max_wait, XrDuration reserve);
 
 		wivrn::from_headset::feedback feedback{};
 
@@ -68,12 +72,32 @@ public:
 		}
 	};
 
+	// Receiver decisions, including frames that never produce a decoded image.
+	struct statistics
+	{
+		uint64_t complete = 0;
+		uint64_t incomplete = 0;
+		uint64_t partial = 0;
+		uint64_t dropped = 0;
+		uint64_t expired = 0;
+		uint64_t late_packets = 0;
+		uint64_t unobserved_frames = 0;
+		uint64_t wait_samples = 0;
+		XrDuration wait_sum = 0;
+		XrDuration wait_max = 0;
+		statistics & operator+=(const statistics &);
+	};
+
 private:
 	shard_set current;
 	shard_set next;
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
 	const bool allow_partial;
+	const XrDuration max_wait;
+	std::atomic<XrDuration> decode_budget = 4'000'000;
+	std::mutex statistics_mutex;
+	statistics pending_statistics;
 
 public:
 	explicit shard_accumulator(
@@ -89,12 +113,19 @@ public:
 	        next(stream_index),
 	        weak_scene(scene),
 	        instance(instance),
-	        allow_partial(description.codec[stream_index] == h264 || description.codec[stream_index] == h265)
+	        allow_partial(description.codec[stream_index] == h264 || description.codec[stream_index] == h265),
+	        max_wait(receive_budget(description.frame_rate))
 	{
 		next.reset(1);
 	}
 
 	void push_shard(wivrn::to_headset::video_stream_data_shard &&);
+	// Called on the network thread, even when no packets arrive.
+	void expire(XrTime now);
+	std::optional<XrTime> next_deadline() const;
+	// Decoder callback and render thread respectively; both may run concurrently.
+	void record_decode_time(XrDuration duration);
+	statistics take_statistics();
 
 	vk::Sampler sampler()
 	{
@@ -111,6 +142,7 @@ private:
 	void try_submit_frame();
 	void send_feedback(wivrn::from_headset::feedback & feedback);
 	void advance();
-	void finish_current();
+	void finish_current(bool expired = false);
+	static XrDuration receive_budget(float frame_rate);
 };
 } // namespace wivrn

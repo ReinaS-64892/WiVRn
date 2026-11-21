@@ -35,7 +35,28 @@ void scenes::stream::process_packets()
 	{
 		try
 		{
-			network_session->poll(*this, std::chrono::milliseconds(500));
+			auto timeout = std::chrono::milliseconds(500);
+			{
+				std::shared_lock lock(decoder_mutex);
+				for (auto & item: decoders)
+				{
+					if (item.decoder)
+						item.decoder->expire(instance.now());
+				}
+				const auto now = instance.now();
+				for (auto & item: decoders)
+				{
+					if (!item.decoder)
+						continue;
+					if (auto deadline = item.decoder->next_deadline())
+					{
+						const auto remaining = std::chrono::nanoseconds(std::max<XrDuration>(0, *deadline - now));
+						timeout = std::min(timeout, std::chrono::ceil<std::chrono::milliseconds>(remaining));
+					}
+				}
+			}
+			// A timeout returns to the deadline service even if no more video arrives.
+			network_session->poll(*this, timeout);
 		}
 		catch (std::exception & e)
 		{

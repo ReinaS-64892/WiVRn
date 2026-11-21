@@ -628,6 +628,8 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			if (decoder != decoders[stream].decoder.get())
 				return;
 			handle->feedback.received_from_decoder = instance.now();
+			if (handle->feedback.sent_to_decoder)
+				decoder->record_decode_time(handle->feedback.received_from_decoder - handle->feedback.sent_to_decoder);
 			std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
 		}
 
@@ -848,6 +850,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	std::shared_lock lock(decoder_mutex);
 	if (not frame_state.shouldRender or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
 	{
+		// Preserve receive loss history/totals even before either eye produces
+		// its first decoded image, or while the runtime suppresses rendering.
+		if (state_ != state::shutdown)
+			accumulate_metrics(frame_state.predictedDisplayTime, {}, {});
 		// TODO: stop/restart video stream
 		session.begin_frame();
 		session.end_frame(frame_state.predictedDisplayTime, {});

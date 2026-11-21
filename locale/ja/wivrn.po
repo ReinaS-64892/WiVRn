@@ -1371,3 +1371,53 @@ msgstr "暗証番号を確認できませんでした"
 #: client/wivrn_client.cpp:194
 msgid "Pairing is disabled on server"
 msgstr "このサーバーではペアリングが無効です"
+
+#: client/scenes/stream_gui.cpp
+msgid "Video loss"
+msgstr "映像フレームの欠損"
+
+#: client/scenes/stream_gui.cpp
+msgid "Incomplete"
+msgstr "欠損あり"
+
+#: client/scenes/stream_gui.cpp
+msgid "Partial decode input"
+msgstr "部分復号へ投入"
+
+#: client/scenes/stream_gui.cpp
+msgid "Discarded"
+msgstr "完全破棄（復号前）"
+
+#: client/scenes/stream_gui.cpp
+msgid "Deadline reached"
+msgstr "受信締切に到達"
+
+#: client/scenes/stream_gui.cpp
+msgid "Receive wait"
+msgstr "受信待ち時間"
+
+#: client/scenes/stream_gui.cpp
+msgid "Mean"
+msgstr "平均"
+
+#: client/scenes/stream_gui.cpp
+msgid "Maximum"
+msgstr "最大"
+
+#: client/scenes/stream_gui.cpp
+msgid "Late video packets"
+msgstr "遅着映像パケット"
+
+#: client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Video reception: incomplete {}, partial {}, discarded {}, deadline {}, late packets {}"
+msgstr "映像受信累計：欠損 {}、部分復号 {}、完全破棄 {}、締切 {}、遅着パケット {}"
+
+#: client/scenes/stream_gui.cpp
+msgid "Video counts cover all streams per display interval. Partial means submitted, not necessarily displayed."
+msgstr "フレーム数は表示周期ごとの全ストリーム合計です。部分復号への投入は、表示成功を意味しません。"
+
+#: client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Unobserved frame IDs: {} (may include frames skipped by the server)"
+msgstr "未受信のフレーム ID：{}（サーバー側の送信スキップを含む場合があります）"

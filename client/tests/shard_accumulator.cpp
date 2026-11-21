@@ -40,6 +40,12 @@ public:
 };
 
 std::shared_ptr<recording_decoder> recording;
+XrTime test_time = 1'000'000;
+
+XrTime display_time(uint64_t frame)
+{
+	return 1'000'000'000 + frame * 11'111'111;
+}
 
 void require(bool condition)
 {
@@ -56,7 +62,7 @@ wivrn::to_headset::video_stream_data_shard packet(uint64_t frame, uint16_t index
 	result.unit = {uint16_t(index / 3), uint16_t(index / 3 * 3), 3, 3, 1, true};
 	result.payload = std::span(data).subspan(index, 1);
 	result.view_info.emplace();
-	result.view_info->display_time = frame + 100;
+	result.view_info->display_time = display_time(frame);
 	if (index == 5)
 		result.timing_info.emplace();
 	return result;
@@ -79,8 +85,7 @@ std::shared_ptr<wivrn::decoder> wivrn::decoder::make(
 }
 XrTime xr::instance::now()
 {
-	static XrTime time = 1;
-	return time++;
+	return test_time;
 }
 void scenes::stream::send_feedback(const wivrn::from_headset::feedback &) {}
 
@@ -106,7 +111,7 @@ int main()
 	require(recording->frames.size() == 3);
 	const auto & concealed = recording->frames[1];
 	require(concealed.feedback.frame_index == 1 && concealed.feedback.stream_corrupted && concealed.feedback.sent_to_decoder);
-	require(!concealed.feedback.received_last_packet && concealed.display_time == 101);
+	require(!concealed.feedback.received_last_packet && concealed.display_time == display_time(1));
 	require(concealed.bytes == std::vector<uint8_t>({3, 4, 5}));
 	receiver.push_shard(packet(1, 0));
 	require(recording->frames.size() == 3);
@@ -139,5 +144,147 @@ int main()
 			opaque.push_shard(packet(1, i));
 		require(recording->frames.size() == 1 && recording->frames[0].feedback.frame_index == 1);
 	}
-	std::cout << "Accumulator: reordering, duplicates, first/final loss, retirement, frame gaps and opaque codecs passed\n";
+	// Wall-clock retirement with no subsequent packets or frame-end marker.
+	description.codec.fill(wivrn::h264);
+	description.frame_rate = 90;
+	recording = std::make_shared<recording_decoder>();
+	wivrn::shard_accumulator timed(device, physical_device, instance, 0, description, {}, 0);
+	test_time = 10'000'000;
+	for (int i: {0, 1, 2, 3})
+	{
+		auto data = packet(0, i);
+		data.view_info->display_time = 22'000'000;
+		timed.push_shard(std::move(data));
+	}
+	require(timed.next_deadline() == 16'000'000); // 4 ms decode + 2 ms render
+	test_time = 15'999'999;
+	timed.expire(test_time);
+	require(recording->frames.empty());
+	timed.push_shard(packet(0, 0)); // duplicate/far prediction cannot extend the timer
+	require(timed.next_deadline() == 16'000'000);
+	test_time = 16'000'000;
+	timed.expire(test_time);
+	require(recording->frames.size() == 1 && recording->frames[0].feedback.stream_corrupted);
+	require(recording->frames[0].bytes == std::vector<uint8_t>({0, 1, 2}));
+	require(!timed.next_deadline());
+	auto stats = timed.take_statistics();
+	require(stats.incomplete == 1 && stats.partial == 1 && stats.expired == 1 && stats.dropped == 0);
+	require(stats.wait_samples == 1 && stats.wait_sum == 6'000'000 && stats.wait_max == 6'000'000);
+	timed.expire(test_time + 100'000'000);
+	timed.push_shard(packet(0, 4));
+	timed.push_shard(packet(0, 5));
+	stats = timed.take_statistics();
+	require(stats.late_packets == 2 && stats.incomplete == 0 && stats.wait_samples == 0);
+	require(recording->frames.size() == 1); // no second submission after expiry
+
+	// All NALs damaged: count a complete discard even without a decoded handle.
+	for (int i: {0, 3})
+	{
+		auto data = packet(1, i);
+		data.view_info->display_time = test_time + 10'000'000;
+		timed.push_shard(std::move(data));
+	}
+	test_time += 4'000'000;
+	timed.expire(test_time);
+	stats = timed.take_statistics();
+	require(stats.incomplete == 1 && stats.dropped == 1 && stats.partial == 0 && stats.expired == 1);
+	require(recording->frames.size() == 1);
+
+	// No prediction metadata: cap the wait at one frame period.
+	const auto started = test_time;
+	auto no_view = packet(2, 0);
+	no_view.view_info.reset();
+	timed.push_shard(std::move(no_view));
+	require(timed.next_deadline() == started + 11'111'111);
+	test_time = *timed.next_deadline();
+	timed.expire(test_time);
+	stats = timed.take_statistics();
+	require(stats.dropped == 1 && stats.expired == 1);
+
+	// A slow decoder increases the reserve used for the following frame.
+	timed.record_decode_time(8'000'000);
+	auto slow = packet(3, 0);
+	slow.view_info->display_time = test_time + 15'000'000;
+	timed.push_shard(std::move(slow));
+	require(timed.next_deadline() == test_time + 3'000'000); // 10 ms + 2 ms
+	test_time += 3'000'000;
+	timed.expire(test_time);
+	timed.take_statistics();
+
+	// A complete frame is submitted immediately rather than waiting for its deadline.
+	for (int i = 0; i < 6; ++i)
+		timed.push_shard(packet(4, i));
+	require(recording->frames.size() == 2 && !timed.next_deadline());
+	stats = timed.take_statistics();
+	require(stats.complete == 1 && stats.expired == 0 && stats.wait_sum == 0);
+
+	// Already-past predictions at startup must not prevent IDR/clock calibration.
+	auto stale = packet(5, 0);
+	stale.view_info->display_time = test_time;
+	timed.push_shard(std::move(stale));
+	require(timed.next_deadline() == test_time + 11'111'111);
+	test_time = *timed.next_deadline();
+	timed.expire(test_time);
+	require(!timed.next_deadline());
+	stats = timed.take_statistics();
+	require(stats.dropped == 1 && stats.expired == 1);
+	for (int i = 0; i < 6; ++i)
+	{
+		auto data = packet(6, i);
+		data.view_info->display_time = test_time;
+		timed.push_shard(std::move(data));
+	}
+	require(recording->frames.size() == 3 && !timed.next_deadline());
+	require(timed.take_statistics().complete == 1);
+
+	// A missing current frame cannot hide the observed successor's timer.
+	for (int i: {0, 1, 2})
+		timed.push_shard(packet(8, i));
+	test_time = *timed.next_deadline();
+	timed.expire(test_time);
+	require(recording->frames.size() == 4 && recording->frames.back().feedback.frame_index == 8);
+	stats = timed.take_statistics();
+	require(stats.unobserved_frames == 1 && stats.expired == 1 && stats.partial == 1);
+
+	// The final source symbol at the boundary is late, even without an explicit tick.
+	description.frame_rate = 90;
+	recording = std::make_shared<recording_decoder>();
+	wivrn::shard_accumulator boundary(device, physical_device, instance, 0, description, {}, 0);
+	for (int i: {0, 1, 2, 3, 4})
+	{
+		auto data = packet(10, i);
+		data.view_info->display_time = test_time + 10'000'000;
+		boundary.push_shard(std::move(data));
+	}
+	test_time += 4'000'000;
+	boundary.push_shard(packet(10, 5));
+	require(recording->frames.size() == 1 && recording->frames[0].feedback.stream_corrupted);
+	stats = boundary.take_statistics();
+	require(stats.partial == 1 && stats.expired == 1 && stats.late_packets == 1 && stats.unobserved_frames == 0);
+
+	// Bound the fallback on both slow and fast video streams.
+	for (const auto [rate, limit]: {std::pair{30.f, XrDuration(20'000'000)}, std::pair{1000.f, XrDuration(2'000'000)}})
+	{
+		description.frame_rate = rate;
+		wivrn::shard_accumulator bounded(device, physical_device, instance, 0, description, {}, 0);
+		auto data = packet(50, 0);
+		data.view_info.reset();
+		bounded.push_shard(std::move(data));
+		require(bounded.next_deadline() == test_time + limit);
+	}
+
+	// Normal reception still records its actual assembly time for the wait plot.
+	description.frame_rate = 90;
+	recording = std::make_shared<recording_decoder>();
+	wivrn::shard_accumulator complete(device, physical_device, instance, 0, description, {}, 0);
+	for (int i = 0; i < 6; ++i)
+	{
+		test_time += 200'000;
+		complete.push_shard(packet(20, i));
+	}
+	stats = complete.take_statistics();
+	require(stats.complete == 1 && stats.incomplete == 0 && stats.expired == 0);
+	require(stats.wait_samples == 1 && stats.wait_sum == 1'000'000 && stats.wait_max == 1'000'000);
+	require(!complete.next_deadline());
+	std::cout << "Accumulator: deadlines, silence, late packets, statistics, decode reserve and frame assembly passed\n";
 }

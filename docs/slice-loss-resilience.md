@@ -30,12 +30,38 @@ by the video-wire test. Repeating view metadata costs bandwidth but avoids a sep
 reliable per-frame metadata dependency.
 
 The receiver buffers two frames. Complete access units are submitted immediately
-and exactly once. When the following frame is complete, or a packet two frames
-ahead arrives, an incomplete current frame is closed using only whole NALs.
-Missing the final packet therefore does not prevent eventual submission. This
-is a frame-progress deadline, not a wall-clock timer: if transmission stops,
-there is no independent timer to flush its final incomplete frame. Late packets
-for retired frames and duplicate source packets are ignored.
+and exactly once. Incomplete access units have an absolute deadline in the
+headset's OpenXR clock domain:
+
+```
+min(predicted_display_time - decode_reserve - 2 ms,
+    first_packet_time + receive_budget)
+```
+
+The decode reserve starts at 4 ms and follows measured decoder turnaround
+(including queue time): 125% of the latest 1–16 ms clamped sample, with a 1%
+decay per decoded frame. The receive budget is one described video frame period,
+clamped to 2–20 ms (90 fps fallback for an invalid rate). Without view metadata,
+the first-packet limit still applies. If the predicted cutoff was already past
+when the first packet arrived, use that same bounded first-packet budget. The
+server pacer starts with no decode/display samples; immediately dropping every
+fragment of a late first IDR would prevent the very feedback needed to calibrate
+its predictions. This fallback allows reference recovery without an unbounded
+wait. Deadlines never extend as more packets arrive; a packet arriving after
+retirement cannot reopen the frame.
+
+The network loop services these deadlines even without further packets and
+rounds poll wakeups up to the nearest millisecond. Draining a buffered socket
+batch returns to the loop to recalculate its timeout, rather than waiting with
+the old idle timeout. These are receiver scheduling limits, not a hard realtime
+guarantee: OS scheduling and blocking decoder/network calls can delay service.
+The reserve is a starting policy requiring hardware latency validation.
+
+An incomplete frame can also close earlier when the following frame is complete
+or a packet two frames ahead arrives. Only whole NALs are used. This preserves
+the earlier frame-progress bound in addition to the new clock deadline. Missing
+the final packet no longer requires another video frame to trigger retirement.
+Late packets for retired frames and duplicate source packets are ignored.
 
 Partial submission requires H.264/HEVC and at least one complete VCL NAL.
 Incomplete NALs contribute no bytes, including when their initial or final
@@ -94,7 +120,8 @@ overhead, recovery work and buffering. More general erasure coding can use the
 same source/repair distinction. Repair packets must fit the wire budget; split
 repair data or reduce the source symbol capacity to accommodate their header.
 
-Recovery must happen inside the existing frame-progress window, without
+Recovery must happen before the absolute receiver deadline and within the
+two-frame buffering window, without
 waiting for parity or retransmission before retiring a stale frame. Preserve
 duplicate/late-packet handling, reject mismatched group metadata, cap recovery
 work, and add separate feedback for recovered and unrecoverable source symbols.
@@ -122,6 +149,9 @@ With WIVRN_BUILD_TEST enabled:
   two-frame receiver with a recording decoder and clock. It covers reordered
   and duplicate packets, first/final packet loss, consecutive damaged frames,
   frame gaps, late packets, view metadata and the AV1/raw complete-frame policy.
+  It also checks timer expiry in complete silence, exact boundary times,
+  missing prediction metadata, measured decode reserves, already-expired
+  predictions, immediate complete-frame submission and receive statistics.
 
 Run the registered tests from the build tree's common and client directories:
 
@@ -129,6 +159,33 @@ Run the registered tests from the build tree's common and client directories:
 ctest --test-dir BUILD_DIR/common -R 'video-' --output-on-failure
 ctest --test-dir BUILD_DIR/client -R shard-accumulator --output-on-failure
 ```
+
+## Client statistics overlay
+
+The existing Statistics overlay now includes Video loss, Receive wait and Late
+video packets. Loss counters are collected at receiver retirement, independently
+of decoded image handles, so discarded frames remain visible. History and
+totals are sampled even before both eyes have produced their first decoded
+image or while rendering is suppressed. The loss graph
+shows counts per display interval summed across all active streams; they are
+not percentages or per-eye FPS. A partial frame also counts as incomplete, and
+expiry is a retirement reason that can overlap either partial submission or
+discard. A complete frame is not delayed just to generate a wait-time sample.
+
+Receive wait plots show mean and maximum time from the first accepted packet to
+receiver retirement for each interval. The text below the graphs shows session
+totals for incomplete frames, partial decode inputs, pre-decode discards,
+deadline retirements and late packets. These decisions do not guarantee that a
+driver outputs or displays an image; downstream decoder/render drops are not
+included in the receiver discard count. Frame-ID gaps are reported separately
+as unobserved, since the server's IDR handling can intentionally skip IDs. The
+first observed frame establishes the start and does not invent a gap from zero.
+
+Missing timestamps on partial frames are gaps in the decoder timing plots,
+rather than artificial zero/epoch timing values. Distinct series colors and
+immediate axis growth keep individual loss spikes visible. Japanese overlay
+labels are included. Reference recovery/IDR acknowledgement behavior remains
+unchanged; these new counters help distinguish receive waiting from other stalls.
 
 Before deployment, validate actual WiVRn on Steam Frame and Android: first,
 middle and last slice loss; missing first/final frame packet; IDR loss; burst

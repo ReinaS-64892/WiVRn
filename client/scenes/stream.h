@@ -331,6 +331,13 @@ private:
 		float cpu_time = 0;
 		float bandwidth_rx = 0;
 		float bandwidth_tx = 0;
+		float incomplete_frames = 0;
+		float partial_frames = 0;
+		float dropped_frames = 0;
+		float expired_frames = 0;
+		float late_video_packets = 0;
+		float receive_wait_mean = 0;
+		float receive_wait_max = 0;
 	};
 
 	struct plot
@@ -368,6 +375,7 @@ private:
 	std::vector<float> axis_scale;
 	XrTime last_metric_time = 0;
 	int metrics_offset = 0;
+	shard_accumulator::statistics video_receive_totals;
 
 	// Used for compact view
 	float compact_bandwidth_rx = 0;
