@@ -51,6 +51,7 @@ public:
 private:
 	typed_socket<TCP, from_headset::packets, to_headset::packets> control;
 	typed_socket<UDP, from_headset::packets, to_headset::packets> stream;
+	std::unique_ptr<port_forwarder> forwarding;
 	std::atomic<bool> active = false;
 	std::string pin;
 	encryption_state state;
@@ -75,6 +76,11 @@ public:
 	}
 	void reset(std::stop_token stop, TCP && tcp, std::function<void()> tick = {});
 	void shutdown();
+	void start_forwarding();
+	void stop_forwarding()
+	{
+		forwarding.reset();
+	}
 
 	template <typename T>
 	void send_control(T && packet)

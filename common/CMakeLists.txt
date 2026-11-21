@@ -15,6 +15,11 @@ add_library(wivrn-common-base STATIC EXCLUDE_FROM_ALL
 )
 add_dependencies(wivrn-common-base wivrn-version)
 
+find_package(Threads REQUIRED)
+add_library(wivrn-forwarding STATIC EXCLUDE_FROM_ALL port_forwarding.cpp)
+target_include_directories(wivrn-forwarding PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(wivrn-forwarding PUBLIC OpenSSL::Crypto Threads::Threads)
+
 add_library(wivrn-common STATIC EXCLUDE_FROM_ALL
     crypto.cpp
     smp.cpp
@@ -77,5 +82,14 @@ else()
 endif()
 
 target_include_directories(wivrn-common-base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(wivrn-common PUBLIC Boost::pfr OpenSSL::Crypto wivrn-external wivrn-common-base)
+target_link_libraries(wivrn-common PUBLIC wivrn-forwarding Boost::pfr OpenSSL::Crypto wivrn-external wivrn-common-base)
 target_compile_definitions(wivrn-common PUBLIC VULKAN_HPP_NO_STRUCT_CONSTRUCTORS)
+
+if(WIVRN_BUILD_TEST)
+    find_package(nlohmann_json REQUIRED)
+    enable_testing()
+    add_executable(wivrn-port-forwarding-test tests/port_forwarding.cpp)
+    target_link_libraries(wivrn-port-forwarding-test PRIVATE wivrn-forwarding nlohmann_json::nlohmann_json)
+    add_test(NAME port-forwarding COMMAND wivrn-port-forwarding-test)
+    set_tests_properties(port-forwarding PROPERTIES TIMEOUT 90)
+endif()

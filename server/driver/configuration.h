@@ -65,6 +65,8 @@ struct configuration
 	std::optional<float> lh_stick_deadzone;
 	bool hid_forwarding = false;
 	bool tcp_only = false;
+	std::vector<forwarding_rule> port_forwarding;
+	uint16_t port_forwarding_port = 9758;
 	int port = wivrn::default_port;
 	std::string hostname = wivrn::hostname();
 	service_publication publication = service_publication::avahi;

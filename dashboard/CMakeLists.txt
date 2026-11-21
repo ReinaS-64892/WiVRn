@@ -48,6 +48,7 @@ qt_add_qml_module(wivrn-dashboard
         qml/ApkInstallPage.qml
         qml/DashboardSettings.qml
         qml/SettingsPage.qml
+        qml/PortForwardingSettings.qml
         qml/HeadsetsPage.qml
         qml/HeadsetStatsPage.qml
         qml/WizardPage.qml
@@ -84,6 +85,7 @@ target_link_libraries(wivrn-dashboard
     QCoro::Core
     QCoro::Network
     QCoro::Qml
+    wivrn-forwarding
     wivrn-common-base
     wivrn-common-server
     wivrn-external

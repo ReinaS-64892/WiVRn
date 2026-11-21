@@ -339,6 +339,10 @@ Kirigami.ScrollablePage {
 
         }
 
+        PortForwardingSettings {
+            id: port_forwarding
+        }
+
         Item {
             // spacer item
             Layout.fillHeight: true
@@ -349,6 +353,8 @@ Kirigami.ScrollablePage {
         standardButtons: Controls.DialogButtonBox.Ok | Controls.DialogButtonBox.Cancel | Controls.DialogButtonBox.Reset
 
         onAccepted: {
+            if (Settings.portForwardingError.length > 0)
+                return;
             settings.save();
             Settings.save(WivrnServer);
 
@@ -398,6 +404,7 @@ Kirigami.ScrollablePage {
     }
 
     function load() {
+        port_forwarding.load();
         select_game.load();
         debug_gui.checked = Settings.debugGui;
         steamvr_lh.checked = Settings.steamVrLh;
