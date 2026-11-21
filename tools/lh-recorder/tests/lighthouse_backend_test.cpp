@@ -62,6 +62,14 @@ int main()
 	require(load("{}") == built_steamvr);
 	setenv("WIVRN_USE_SURVIVE", "1", true);
 	require(load("{}") == select_lighthouse_backend(true, true, WIVRN_FEATURE_STEAMVR_LIGHTHOUSE, WIVRN_FEATURE_SURVIVE));
+	std::ofstream(path) << R"({"controller-max-extrapolation":20})";
+	require(wivrn::configuration().controller_max_extrapolation == 20);
+	std::ofstream(path) << R"({"controller-max-extrapolation":0})";
+	require(wivrn::configuration().controller_max_extrapolation == 0);
+	std::ofstream(path) << R"({"controller-max-extrapolation":-2})";
+	require(wivrn::configuration().controller_max_extrapolation == -1);
+	std::ofstream(path) << R"({"controller-max-extrapolation":"invalid"})";
+	require(wivrn::configuration().controller_max_extrapolation == -1);
 	std::filesystem::remove(path);
 	std::filesystem::remove(directory);
 	std::cout << "Lighthouse backend config reload, exclusivity, build availability and environment: passed\n";

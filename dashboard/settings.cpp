@@ -20,10 +20,11 @@
 #include "lighthouse_backend.h"
 #include "lighthouse_recording_defaults.h"
 #include "lighthouse_reference_settings.h"
-#include <QUrl>
 #include "port_forwarding_config.h"
+#include "pose_prediction.h"
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QUrl>
 
 #include "escape_string.h"
 #include "gui_config.h"
@@ -139,6 +140,7 @@ void Settings::emitAllChanged()
 	lhAverageRelationshipsChanged();
 	lhMaxExtrapolationEnabledChanged();
 	lhMaxExtrapolationChanged();
+	controllerMaxExtrapolationChanged();
 	lhStickDeadzoneChanged();
 	hidForwardingChanged();
 	portChanged();
@@ -829,6 +831,7 @@ void Settings::restore_defaults()
 	m_jsonSettings.erase("lighthouse-recording");
 	m_jsonSettings.erase("lh-average-relationships");
 	m_jsonSettings.erase("lh-stick-deadzone");
+	m_jsonSettings.erase("controller-max-extrapolation");
 	m_jsonSettings.erase("lh-max-extrapolation");
 	m_jsonSettings.erase("port-forwarding");
 	m_jsonSettings.erase("port-forwarding-port");
@@ -885,6 +888,21 @@ bool Settings::hid_forwarding() const
 		}
 	}
 	return can_open_uinput.value();
+}
+
+int64_t Settings::controllerMaxExtrapolation() const
+{
+	return wivrn::pose_prediction_limit(m_jsonSettings, "controller-max-extrapolation");
+}
+
+void Settings::set_controllerMaxExtrapolation(const int64_t & value)
+{
+	if (value < -1 || value > 100)
+		return;
+	auto old = controllerMaxExtrapolation();
+	m_jsonSettings["controller-max-extrapolation"] = value;
+	if (old != value)
+		controllerMaxExtrapolationChanged();
 }
 
 #include "moc_settings.cpp"

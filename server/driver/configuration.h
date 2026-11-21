@@ -20,8 +20,8 @@
 #pragma once
 
 #include "hostname.h"
-#include "lighthouse_recording_defaults.h"
 #include "lighthouse_backend.h"
+#include "lighthouse_recording_defaults.h"
 #include "wivrn_config.h"
 #include <array>
 #include <chrono>
@@ -67,6 +67,7 @@ struct configuration
 	bool lighthouse_recording_enabled = false;
 	std::filesystem::path lighthouse_recording_output = default_lighthouse_recording_directory();
 	std::optional<int64_t> lh_max_extrapolation;
+	int64_t controller_max_extrapolation = -1;
 	std::optional<float> lh_stick_deadzone;
 	bool hid_forwarding = false;
 	bool tcp_only = false;
