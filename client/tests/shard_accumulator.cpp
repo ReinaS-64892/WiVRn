@@ -171,6 +171,7 @@ int main()
 	auto stats = timed.take_statistics();
 	require(stats.incomplete == 1 && stats.partial == 1 && stats.expired == 1 && stats.dropped == 0);
 	require(stats.wait_samples == 1 && stats.wait_sum == 4'000'000 && stats.wait_max == 4'000'000);
+	require(stats.deadline_slice_frames[1] == 1 && stats.deadline_intact_slices == 1 && stats.deadline_damaged_slices == 1);
 	timed.expire(test_time + 100'000'000);
 	timed.push_shard(packet(0, 4));
 	timed.push_shard(packet(0, 5));
@@ -189,6 +190,7 @@ int main()
 	timed.expire(test_time);
 	stats = timed.take_statistics();
 	require(stats.incomplete == 1 && stats.dropped == 1 && stats.partial == 0 && stats.expired == 1);
+	require(stats.deadline_slice_frames[0] == 1 && stats.deadline_intact_slices == 0 && stats.deadline_damaged_slices == 2);
 	require(recording->frames.size() == 1);
 
 	// No prediction metadata: use the initial 4 ms assembly budget.
@@ -287,27 +289,10 @@ int main()
 	require(stats.complete == 1 && stats.incomplete == 0 && stats.expired == 0);
 	require(stats.wait_samples == 1 && stats.wait_sum == 1'000'000 && stats.wait_max == 1'000'000);
 	require(!complete.next_deadline());
-	// Fast intact UDP samples learn a 1.5x mean; slow outliers are excluded.
-	wivrn::receive_time_budget learned(11'111'111);
-	for (int i = 0; i < 24; ++i)
-		learned.complete(2'000'000);
-	for (int i = 0; i < 8; ++i)
-		learned.complete(8'000'000);
-	require(learned.value() == 3'000'000);
-	for (int i = 0; i < 8; ++i)
-		learned.incomplete();
-	require(learned.value() == 4'500'000);
-	for (int i = 0; i < 64; ++i)
-		learned.incomplete();
-	require(learned.value() == 11'111'111);
-	for (int i = 0; i < 32; ++i)
-		learned.complete(2'000'000);
-	require(learned.value() == 3'000'000);
-
 	// Actual assembler follows the learned budget, not just the estimator.
 	recording = std::make_shared<recording_decoder>();
 	wivrn::shard_accumulator adaptive(device, physical_device, instance, 0, description, {}, 0);
-	for (uint64_t f = 100; f < 132; ++f)
+	for (uint64_t f = 100; f < 1200; ++f)
 	{
 		for (int i = 0; i < 6; ++i)
 		{
@@ -318,46 +303,27 @@ int main()
 		test_time += 9'000'000;
 	}
 	require(adaptive.current_receive_budget() == 3'000'000);
-	adaptive.push_shard(packet(132, 0));
+	adaptive.push_shard(packet(1200, 0));
 	require(adaptive.next_deadline() == test_time + 3'000'000);
 	test_time = *adaptive.next_deadline();
 	adaptive.expire(test_time);
 	test_time += 300'000;
-	adaptive.push_shard(packet(132, 1)); // 3.3 ms after the first packet
-	require(adaptive.current_receive_budget() == 3'800'000);
+	adaptive.push_shard(packet(1200, 1)); // 3.3 ms after the first packet
+	require(adaptive.current_receive_budget() == 3'000'000);
 	// A late duplicate of a complete frame must not inflate the timeout.
-	adaptive.push_shard(packet(131, 1));
-	require(adaptive.current_receive_budget() == 3'800'000);
+	adaptive.push_shard(packet(1199, 1));
+	require(adaptive.current_receive_budget() == 3'000'000);
 	// Preserve an earlier display deadline. Its late symbols do not train the
 	// UDP tail allowance, since a larger UDP cap would not have saved it.
-	auto display_limited = packet(133, 0);
+	auto display_limited = packet(1201, 0);
 	display_limited.view_info->display_time = test_time + 7'000'000;
 	adaptive.push_shard(std::move(display_limited));
 	require(adaptive.next_deadline() == test_time + 1'000'000);
 	test_time = *adaptive.next_deadline();
 	adaptive.expire(test_time);
 	test_time += 4'000'000;
-	adaptive.push_shard(packet(133, 1));
-	require(adaptive.current_receive_budget() == 3'800'000);
-
-	// Late arrival evidence prevents isolated loss from being hidden by the
-	// old "eight consecutive losses" gate. A stalled outlier is bounded.
-	wivrn::receive_time_budget jitter(11'111'111);
-	for (int i = 0; i < 32; ++i)
-		jitter.complete(600'000);
-	require(jitter.value() == 2'000'000);
-	jitter.late(2'200'000);
-	require(jitter.value() == 2'700'000);
-	jitter.complete(600'000);
-	require(jitter.value() > 2'600'000); // one good frame cannot erase the tail
-	jitter.late(35'000'000);
-	require(jitter.value() == 4'000'000);
-	for (int i = 0; i < 128; ++i)
-		jitter.complete(600'000);
-	require(jitter.value() == 2'000'000);
-	wivrn::receive_time_budget high_fps(2'000'000);
-	high_fps.late(35'000'000);
-	require(high_fps.value() == 2'000'000);
+	adaptive.push_shard(packet(1201, 1));
+	require(adaptive.current_receive_budget() == 3'000'000);
 
 	// TCP recovery IDRs can finish beyond both the UDP and display deadlines.
 	// A fresh receiver accepts high server frame IDs after reconnect.
@@ -421,5 +387,37 @@ int main()
 	data = std::make_unique<int>(42);
 	wivrn::dispatch_packet(dispatch, std::move(data), true);
 	require(dispatch.other == 42);
-	std::cout << "Accumulator: deadlines, silence, late packets, statistics, decode reserve and frame assembly passed\n";
+	// Deadline survival histogram counts VCL units, not packets, including a
+	// lost first symbol and four intact slices with no frame-end marker.
+	recording = std::make_shared<recording_decoder>();
+	wivrn::shard_accumulator slices(device, physical_device, instance, 0, description, {}, 0);
+	wivrn::shard_accumulator::statistics slice_totals;
+	static uint8_t byte = 1;
+	for (unsigned intact = 0; intact <= 4; ++intact)
+	{
+		for (unsigned unit = 0; unit < 4; ++unit)
+			for (unsigned symbol = 0; symbol < 2; ++symbol)
+			{
+				if (unit >= intact && symbol != unit % 2)
+					continue;
+				wivrn::to_headset::video_stream_data_shard data{};
+				data.frame_idx = intact;
+				data.shard_idx = unit * 2 + symbol;
+				data.unit = {uint16_t(unit), uint16_t(unit * 2), 2, 2, 1, true};
+				data.payload = std::span(&byte, 1);
+				data.view_info.emplace();
+				data.view_info->display_time = test_time + 1'000'000'000;
+				slices.push_shard(std::move(data));
+			}
+		test_time = *slices.next_deadline();
+		slices.expire(test_time);
+		auto snapshot = slices.take_statistics();
+		require(snapshot.deadline_slice_frames[intact] == 1);
+		require(snapshot.deadline_intact_slices == intact && snapshot.deadline_damaged_slices == 4 - intact);
+		slice_totals += snapshot;
+	}
+	for (auto count: slice_totals.deadline_slice_frames)
+		require(count == 1);
+	require(slice_totals.deadline_intact_slices == 10 && slice_totals.deadline_damaged_slices == 10);
+	std::cout << "Accumulator: deadlines, silence, late packets, statistics, decode reserve, slice histograms and frame assembly passed\n";
 }

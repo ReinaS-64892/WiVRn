@@ -41,22 +41,28 @@ min(predicted_display_time - decode_reserve - 2 ms,
 The decode reserve starts at 4 ms and follows measured decoder turnaround
 (including queue time): 125% of the latest 1–16 ms clamped sample, with a 1%
 decay per decoded frame. The UDP receive budget starts at 4 ms (or the ceiling
-below, if smaller). After eight complete UDP samples it becomes 1.5 times the
-mean of the fastest 75% of the last 32 complete UDP assembly durations, with a
-2 ms floor. The ceiling is one described video frame period clamped to 2–20 ms
-(90 fps fallback for an invalid rate). Slow successful outliers, truncated
-frames, decoder turnaround and TCP recovery do not train the normal budget.
+below, if smaller). Observations are grouped into four one-second clock buckets.
+Each retains up to 256 complete UDP assembly durations, with older samples
+replaced within a full bucket. At least eight complete samples are required to
+learn 1.5 times the fastest 75% mean, with a 2 ms floor. The ceiling is one
+described video frame period clamped to 2–20 ms (90 fps fallback for an invalid
+rate). Slow successful outliers, truncated waits, decoder turnaround and TCP
+recovery do not train the normal mean.
+
 For the last 64 retired frame IDs, late UDP source packets from an adaptive
-expiry contribute a separate tail allowance: elapsed time since that frame's
-first packet plus 0.5 ms, bounded to 2–4 ms and the frame-period ceiling. A
-late duplicate of a complete frame, a reliable frame, or a display-deadline
-retirement does not train this allowance. Late symbols stay discarded; this
-only adjusts following frames. The tail allowance decays by 1/128 per complete
-UDP frame, so a single fast frame cannot immediately erase the observed jitter.
-The effective budget is the larger of the fast-sample budget and this allowance.
-After eight consecutive incomplete UDP frames, expand the fast budget by 50% to at
-least 4 ms, within the ceiling, and restart learning. This avoids permanently
-censoring slower samples after a sustained network change. Without view metadata,
+expiry contribute elapsed time since that frame's first packet plus 0.5 ms,
+bounded to 2–4 ms and the frame-period ceiling. Each clock bucket retains its
+peak allowance. Complete-frame duplicates, reliable frames and display-deadline
+retirements do not train it. Symbols remain discarded; this changes future
+frames. Eight consecutive incomplete UDP frames also raise a recovery target
+to at least 4 ms or 150% of the current cap, within the ceiling.
+
+Targets use the recent clock buckets. The applied cap updates at most once per
+second, rises by at most 0.5 ms per update and falls by at most 0.1 ms per update,
+with a 0.05 ms deadband. Even after an idle gap only one bounded step is applied.
+This removes packet-driven jumps and frame-rate-dependent decay. The recent
+late-arrival allowance must age out before the cap can decline. Existing armed
+deadlines are unchanged. Without view metadata,
 the first-packet limit still applies. If the predicted cutoff was already past
 when the first packet arrived, use that same bounded first-packet budget. The
 server pacer starts with no decode/display samples; immediately dropping every
@@ -182,7 +188,7 @@ Run the registered tests from the build tree's common and client directories:
 
 ```sh
 ctest --test-dir BUILD_DIR/common -R 'video-' --output-on-failure
-ctest --test-dir BUILD_DIR/client -R 'shard-accumulator|video-diagnostics' --output-on-failure
+ctest --test-dir BUILD_DIR/client -R 'shard-accumulator|video-diagnostics|receive-time-budget' --output-on-failure
 ```
 
 ## Recorded limit adjustment (2026-11-22)
@@ -259,6 +265,13 @@ Heartbeat `state` values are 0 initializing, 1 streaming, 2 stalled, 3 shutdown;
 Heartbeat `received` is cumulative
 connection receive bytes; its `budget_ns` is the requested poll timeout.
 
+Frame retirement events also record `vcl_observed` (distinct VCL units with any
+received symbol) and `vcl_damaged` (observed units that cannot be submitted).
+Existing `vcl` counts intact VCL units; parameter sets and other non-VCL NALs do
+not count as slices. Entirely unseen units are absent from the observed count,
+so damaged counts are lower bounds, not a presumed four-slice total. These
+additive schema-1 fields are zero for unrelated event kinds.
+
 Frame retirement events contain first/retirement/display/deadline times, the
 learned UDP cap, transport, received source count, advertised minimum source
 count, intact NAL/VCL counts, completeness, attempted submission and expiry.
@@ -278,7 +291,45 @@ A crash may leave the final line unfinished and omit the stop record; earlier
 complete lines remain usable. These are timing/decision logs, not packet payload
 or image dumps, nor a complete copy of the client's standard-output log.
 
+## Recorded stability and slice retention (2026-11-22)
+
+Second input: `../log/wivrn-client-log/video-1795279352841449734-81607-0.jsonl`,
+commit `1443f27d`, approximately 160 seconds, no recording overflow.
+Streams 0/1 have 841 incomplete UDP frames out of 27,770 (3.03%), compared with
+20.52% in the previous recording. Workloads/time intervals differ; this is not
+a controlled measurement of the change alone. Their first-packet caps range
+from 2 to 4 ms, with 388 frame-to-frame changes of at least 0.1 ms; the median
+such change is 0.814 ms. This motivates clock windows and bounded update speed.
+
+Of the 840 deadline retirements in streams 0/1:
+
+| Intact VCL slices | Frames | Share |
+| --- | ---: | ---: |
+| 0 | 259 | 30.8% |
+| 1 | 240 | 28.6% |
+| 2 | 202 | 24.0% |
+| 3 | 137 | 16.3% |
+| 4 | 2 | 0.2% |
+
+Thus most retain at least one whole slice. Four intact slices can coexist with
+other lost NALs or frame metadata, so the final row is still incomplete input.
+Across all streams there are 591 partial submissions and only three matched
+decoded outputs. The two decoded partial outputs in streams 0/1 both retain all
+four VCL slices; the third output, in stream 2, retains three. There is no
+matched decoded main-eye output with a missing VCL slice in this recording. All 588 Iris CAPTURE errors report `timestamp=0`, `known=false`
+and `bytes_used=0`: there is no returned image to display. Increasing the slice
+count alone cannot be assumed to fix this driver behaviour. Keep capture output
+validation; do not associate timestamp-less empty output with an arbitrary pose.
+
 ## Client statistics overlay
+
+The Intact slices at deadline graph bins incomplete H.264/HEVC deadline frames
+by 0, 1, 2, 3 or 4+ surviving VCL NALs. The text below shows cumulative bins plus
+intact and known-damaged slice totals. A zero-slice frame is all unavailable at
+retirement, rather than proof that every byte was lost. Entirely unobserved
+frames and opaque codecs do not enter this histogram. Counts include all
+active streams, not just the left/right eyes, and remain available without
+recording enabled or successful decoder output.
 
 The existing Statistics overlay now includes Video loss, Receive wait and Late
 video packets. Loss counters are collected at receiver retirement, independently

@@ -37,6 +37,7 @@ int main()
 		frame[i] = shard{video_unit_info{uint16_t(i / 3), uint16_t(i / 3 * 3), 3, 6, 2, i >= 3}, std::span(bytes).subspan(i * 2, 2)};
 	auto all = complete_video_units(frame);
 	require(all.spans.size() == 9 && all.has_vcl);
+	require(all.unit_count == 3 && all.vcl_count == 2);
 
 	// Losing any symbol drops that entire unit, retaining all other units.
 	for (size_t i = 0; i < frame.size(); ++i)
@@ -45,6 +46,7 @@ int main()
 		damaged[i].reset();
 		auto selected = complete_video_units(damaged);
 		require(selected.spans.size() == 6 && selected.has_vcl);
+		require(selected.unit_count == 2 && selected.vcl_count == (i < 3 ? 2 : 1));
 		for (const auto & span: selected.spans)
 			require(span.data() < bytes.data() + (i / 3) * 6 || span.data() >= bytes.data() + (i / 3 + 1) * 6);
 	}

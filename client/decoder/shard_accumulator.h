@@ -96,6 +96,9 @@ public:
 		XrDuration reliable_wait_max = 0;
 		uint64_t no_slice = 0;
 		uint64_t partial_unsupported = 0;
+		std::array<uint64_t, 5> deadline_slice_frames{}; // 0, 1, 2, 3, 4+ intact VCL NALs
+		uint64_t deadline_intact_slices = 0;
+		uint64_t deadline_damaged_slices = 0; // Lower bound: wholly unseen NALs are unknown.
 		statistics & operator+=(const statistics &);
 	};
 

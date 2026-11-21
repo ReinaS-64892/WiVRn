@@ -80,6 +80,8 @@ struct video_unit_payload
 {
 	std::vector<std::span<const uint8_t>> spans;
 	bool has_vcl = false;
+	size_t unit_count = 0;
+	size_t vcl_count = 0;
 };
 
 // Select only whole, consistently described units. No bytes from a damaged NAL
@@ -118,6 +120,8 @@ video_unit_payload complete_video_units(const std::vector<std::optional<Shard>> 
 			for (size_t j = i; j < end; ++j)
 				result.spans.emplace_back(shards[j]->payload);
 			result.has_vcl |= unit.vcl;
+			++result.unit_count;
+			result.vcl_count += unit.vcl;
 			i = end;
 		}
 		else

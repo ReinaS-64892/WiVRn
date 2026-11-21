@@ -180,7 +180,7 @@ void video_diagnostics::write_events(int fd)
 			std::string bytes;
 			for (const auto & e: batch)
 			{
-				bytes += fmt::format("{{\"kind\":{},\"detail\":{},\"mono_ns\":{},\"xr_ns\":{},\"frame\":{},\"stream\":{},\"first_ns\":{},\"deadline_ns\":{},\"display_ns\":{},\"wait_ns\":{},\"budget_ns\":{},\"received\":{},\"expected_min\":{},\"units\":{},\"vcl\":{},\"reliable\":{},\"complete\":{},\"submitted\":{},\"expired\":{}}}\n",
+				bytes += fmt::format("{{\"kind\":{},\"detail\":{},\"mono_ns\":{},\"xr_ns\":{},\"frame\":{},\"stream\":{},\"first_ns\":{},\"deadline_ns\":{},\"display_ns\":{},\"wait_ns\":{},\"budget_ns\":{},\"received\":{},\"expected_min\":{},\"units\":{},\"vcl\":{},\"vcl_observed\":{},\"vcl_damaged\":{},\"reliable\":{},\"complete\":{},\"submitted\":{},\"expired\":{}}}\n",
 				                     json_string(e.kind),
 				                     json_string(e.detail),
 				                     e.mono_ns,
@@ -196,6 +196,8 @@ void video_diagnostics::write_events(int fd)
 				                     e.expected_min,
 				                     e.units,
 				                     e.vcl,
+				                     e.vcl_observed,
+				                     e.vcl_damaged,
 				                     e.reliable,
 				                     e.complete,
 				                     e.submitted,

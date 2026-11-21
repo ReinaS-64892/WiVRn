@@ -34,7 +34,7 @@ int main()
 	for (int p = 0; p < 3; ++p)
 		producers.emplace_back([&, p] {
 			for (int i = 0; i < 200; ++i)
-				recorder.record({.kind = "frame", .detail = "quote\" slash\\ newline\n tab\t", .frame = uint64_t(i), .stream = uint32_t(p), .received = 4, .expected_min = 6, .submitted = true});
+				recorder.record({.kind = "frame", .detail = "quote\" slash\\ newline\n tab\t", .frame = uint64_t(i), .stream = uint32_t(p), .received = 4, .expected_min = 6, .vcl = 3, .vcl_observed = 4, .vcl_damaged = 1, .submitted = true});
 		});
 	for (auto & producer: producers)
 		producer.join();
@@ -57,6 +57,7 @@ int main()
 			++frames;
 			require(line.find("quote\\\" slash\\\\ newline\\u000a tab\\u0009") != std::string::npos);
 			require(line.find("\"expected_min\":6") != std::string::npos);
+			require(line.find("\"vcl_observed\":4") != std::string::npos && line.find("\"vcl_damaged\":1") != std::string::npos);
 		}
 	}
 	require(lines == 604 && frames == 600);

@@ -1468,3 +1468,37 @@ msgstr "完全なスライスなし"
 #: client/video_diagnostics_gui.cpp client/scenes/stream_gui.cpp
 msgid "Partial decoding unsupported"
 msgstr "部分復号非対応"
+
+#: client/scenes/stream_gui.cpp
+msgid "Intact slices at deadline"
+msgstr "締切時の生存スライス数"
+
+#: client/scenes/stream_gui.cpp
+msgid "0 slices"
+msgstr "0枚（全滅）"
+
+#: client/scenes/stream_gui.cpp
+msgid "1 slice"
+msgstr "1枚生存"
+
+#: client/scenes/stream_gui.cpp
+msgid "2 slices"
+msgstr "2枚生存"
+
+#: client/scenes/stream_gui.cpp
+msgid "3 slices"
+msgstr "3枚生存"
+
+#: client/scenes/stream_gui.cpp
+msgid "4+ slices"
+msgstr "4枚以上生存"
+
+#: client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Deadline frames by intact slices: 0={}, 1={}, 2={}, 3={}, 4+={}"
+msgstr "締切時の生存枚数別フレーム累計：0枚={}、1枚={}、2枚={}、3枚={}、4枚以上={}"
+
+#: client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Slices at deadline: {} intact, at least {} damaged. Entirely unseen slices are unknown."
+msgstr "締切時のスライス累計：生存 {} 枚、欠損は少なくとも {} 枚。全パケット未受信のスライス数は不明です。"

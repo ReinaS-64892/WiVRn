@@ -130,6 +130,10 @@ shard_accumulator::statistics & shard_accumulator::statistics::operator+=(const 
 	reliable_wait_max = std::max(reliable_wait_max, other.reliable_wait_max);
 	no_slice += other.no_slice;
 	partial_unsupported += other.partial_unsupported;
+	for (size_t i = 0; i < deadline_slice_frames.size(); ++i)
+		deadline_slice_frames[i] += other.deadline_slice_frames[i];
+	deadline_intact_slices += other.deadline_intact_slices;
+	deadline_damaged_slices += other.deadline_damaged_slices;
 	return *this;
 }
 
@@ -234,7 +238,7 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard, bool reliab
 		const auto & retired = retired_frames[shard.frame_idx % retired_frames.size()];
 		if (!reliable && retired.adaptive_expiry && retired.frame == shard.frame_idx)
 		{
-			assembly_budget.late(std::max<XrDuration>(0, now - retired.first_packet));
+			assembly_budget.late(std::max<XrDuration>(0, now - retired.first_packet), now);
 			published_receive_budget.store(assembly_budget.value(), std::memory_order_relaxed);
 		}
 		// frame is in the past, drop it
@@ -346,29 +350,30 @@ void shard_accumulator::finish_current(bool expired)
 		        .adaptive_expiry = !complete && expired && current.deadline == current.feedback.received_first_packet + current.receive_limit,
 		};
 		if (complete)
-			assembly_budget.complete(std::max<XrDuration>(0, current.assembled_at - current.feedback.received_first_packet));
+			assembly_budget.complete(std::max<XrDuration>(0, current.assembled_at - current.feedback.received_first_packet), now);
 		else
-			assembly_budget.incomplete();
+			assembly_budget.incomplete(now);
 		published_receive_budget.store(assembly_budget.value(), std::memory_order_relaxed);
 	}
+	// Count each advertised VCL unit once, even if its first source symbol was
+	// lost. Entirely unseen units cannot be inferred from a source descriptor.
+	uint64_t observed_vcl = 0;
+	std::vector<bool> observed_units(current.data.size());
+	for (const auto & shard: current.data)
+		if (shard && !observed_units[shard->unit.first_shard])
+		{
+			observed_units[shard->unit.first_shard] = true;
+			observed_vcl += shard->unit.vcl;
+		}
+	const auto damaged_vcl = observed_vcl - payload.vcl_count;
 	if (video_diagnostics::get().active())
 	{
-		uint64_t received = 0, expected = 0, units = 0, vcl = 0;
+		uint64_t received = 0, expected = 0;
 		for (const auto & shard: current.data)
 			if (shard)
 			{
 				++received;
 				expected = std::max<uint64_t>(expected, uint64_t(shard->unit.first_shard) + shard->unit.shard_count);
-			}
-		// Count whole units, not the number of packet spans in those units.
-		for (const auto & shard: current.data)
-			if (shard && shard->shard_idx == shard->unit.first_shard)
-			{
-				bool intact = true;
-				for (uint32_t i = shard->unit.first_shard; i < uint32_t(shard->unit.first_shard) + shard->unit.shard_count; ++i)
-					intact &= i < current.data.size() && current.data[i] && current.data[i]->unit == shard->unit;
-				units += intact;
-				vcl += intact && shard->unit.vcl;
 			}
 		video_diagnostics::get().record({.kind = "frame", .detail = complete ? "complete" : !view      ? "no_view"
 		                                                                            : !allow_partial   ? "partial_unsupported"
@@ -384,8 +389,10 @@ void shard_accumulator::finish_current(bool expired)
 		                                 .budget_ns = budget,
 		                                 .received = received,
 		                                 .expected_min = expected,
-		                                 .units = units,
-		                                 .vcl = vcl,
+		                                 .units = payload.unit_count,
+		                                 .vcl = payload.vcl_count,
+		                                 .vcl_observed = observed_vcl,
+		                                 .vcl_damaged = damaged_vcl,
 		                                 .reliable = current.reliable,
 		                                 .complete = complete,
 		                                 .submitted = submit,
@@ -411,6 +418,12 @@ void shard_accumulator::finish_current(bool expired)
 		}
 		pending_statistics.no_slice += !complete && allow_partial && !payload.has_vcl;
 		pending_statistics.partial_unsupported += !complete && !allow_partial;
+		if (expired && !complete && allow_partial)
+		{
+			++pending_statistics.deadline_slice_frames[std::min<size_t>(payload.vcl_count, 4)];
+			pending_statistics.deadline_intact_slices += payload.vcl_count;
+			pending_statistics.deadline_damaged_slices += damaged_vcl;
+		}
 	}
 	if (submit)
 	{

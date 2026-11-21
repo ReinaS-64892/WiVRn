@@ -27,6 +27,7 @@ public:
 		uint32_t stream = 0;
 		int64_t first_ns = 0, deadline_ns = 0, display_ns = 0, wait_ns = 0, budget_ns = 0;
 		uint64_t received = 0, expected_min = 0, units = 0, vcl = 0;
+		uint64_t vcl_observed = 0, vcl_damaged = 0;
 		bool reliable = false, complete = false, submitted = false, expired = false;
 	};
 	struct status
