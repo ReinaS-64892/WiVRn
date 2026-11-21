@@ -383,6 +383,7 @@ void wivrn_session::request_stop()
 
 void wivrn_session::pause_session()
 {
+	connection->stop_forwarding();
 	assert(mnd_ipc_server);
 
 	// notify clients about session pause
@@ -407,6 +408,7 @@ void wivrn_session::pause_session()
 
 void wivrn_session::resume_session()
 {
+	connection->start_forwarding();
 	assert(mnd_ipc_server);
 
 	// reset session components and send descriptor packets to headset

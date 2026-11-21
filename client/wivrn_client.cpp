@@ -116,6 +116,27 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 
 	to_headset::crypto_handshake crypto_handshake = std::get<to_headset::crypto_handshake>(receive(10s));
 
+	auto start_forwarding = [&](const forwarding_setup & setup) {
+		try
+		{
+			sockaddr_in6 peer{};
+			if constexpr (std::is_same_v<T, sockaddr_in6>)
+				peer = address;
+			else
+			{
+				peer.sin6_family = AF_INET6;
+				peer.sin6_addr.s6_addr[10] = 0xff;
+				peer.sin6_addr.s6_addr[11] = 0xff;
+				memcpy(peer.sin6_addr.s6_addr + 12, &address.sin_addr, 4);
+			}
+			forwarding = port_forwarder::connect(setup, peer, [](const std::string & message) { spdlog::info("Port forwarding: {}", message); });
+		}
+		catch (const std::exception & e)
+		{
+			spdlog::warn("Port forwarding disabled: {}", e.what());
+		}
+	};
+
 	std::string pin = "000000";
 	switch (crypto_handshake.state)
 	{
@@ -125,6 +146,7 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 			send_control(from_headset::crypto_handshake{});
 
 			to_headset::handshake h{std::get<to_headset::handshake>(receive(10s))};
+			start_forwarding(h.forwarding);
 			if (h.stream_port > 0 && !tcp_only)
 			{
 				stream = decltype(stream)();
@@ -177,6 +199,7 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 			send_control(from_headset::crypto_handshake{});
 
 			to_headset::handshake h{std::get<to_headset::handshake>(receive(10s))};
+			start_forwarding(h.forwarding);
 			if (h.stream_port > 0 && !tcp_only)
 			{
 				stream = decltype(stream)();
