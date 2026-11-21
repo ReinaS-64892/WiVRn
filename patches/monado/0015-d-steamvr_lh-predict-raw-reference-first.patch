@@ -1,7 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From cc1bc19979a53617de55de0b70c266cb57678169 Mon Sep 17 00:00:00 2001
 From: OpenAI Codex <codex@openai.com>
-Date: Tue, 6 Oct 2026 18:00:00 +0900
-Subject: [PATCH] d/steamvr_lh: predict tracking reference before local pose offset
+Date: Tue, 20 Oct 2026 16:07:00 +0900
+Subject: [PATCH] d/steamvr_lh: predict tracking reference before local pose
+ offset
 
 Device::update_pose moves the driver tracking reference through the fixed
 driver-from-head transform before storing its relation. Its linear velocity
@@ -26,10 +27,15 @@ future-ground-truth error. This is a reference patch for review.
 No timestamp conversion change, prediction toggles, diagnostic logging or
 clamp-policy change is included.
 
-Base: WiVRn Monado pin 09741cbcb45236f4f4f79790ea133cd90d68d5eb plus patches 0001-0014
+Base: WiVRn Monado pin 8b259763fdd23c46592fd4cdd30b4eea997d4b70 plus preceding patches.
+The pose time offset unit correction is already included in this Monado revision.
 ---
+ src/xrt/drivers/steamvr_lh/device.cpp | 61 +++++++++++++++++++++++++--
+ src/xrt/drivers/steamvr_lh/device.hpp |  3 ++
+ 2 files changed, 61 insertions(+), 3 deletions(-)
 
 diff --git a/src/xrt/drivers/steamvr_lh/device.cpp b/src/xrt/drivers/steamvr_lh/device.cpp
+index 5a992c92e..c1842eca0 100644
 --- a/src/xrt/drivers/steamvr_lh/device.cpp
 +++ b/src/xrt/drivers/steamvr_lh/device.cpp
 @@ -13,6 +13,7 @@
@@ -40,7 +46,7 @@ diff --git a/src/xrt/drivers/steamvr_lh/device.cpp b/src/xrt/drivers/steamvr_lh/
  
  #include "interfaces/context.hpp"
  
-@@ -779,9 +780,50 @@
+@@ -779,9 +780,50 @@ ControllerDevice::get_hand_tracking(enum xrt_input_name name,
  	return XRT_SUCCESS;
  }
  
@@ -91,7 +97,7 @@ diff --git a/src/xrt/drivers/steamvr_lh/device.cpp b/src/xrt/drivers/steamvr_lh/
  	static const int64_t max_extrapolation_ns = []() -> int64_t {
  		int64_t raw = debug_get_num_option_lh_max_extrapolation_ms();
  		if (raw == -1) {
-@@ -791,8 +833,17 @@
+@@ -791,8 +833,17 @@ Device::get_pose(uint64_t at_timestamp_ns, xrt_space_relation *out_relation)
  		return raw * U_TIME_1MS_IN_NS;
  	}();
  
@@ -111,9 +117,9 @@ diff --git a/src/xrt/drivers/steamvr_lh/device.cpp b/src/xrt/drivers/steamvr_lh/
  }
  
  xrt_result_t
-@@ -1222,7 +1273,11 @@
- 	const int64_t pose_time_offset_ns = static_cast<int64_t>(newPose.poseTimeOffset * 1000000000.0);
- 	const int64_t ts = chrono_timestamp_ns() + pose_time_offset_ns;
+@@ -1220,7 +1271,11 @@ Device::update_pose(const vr::DriverPose_t &newPose) const
+ 
+ 	const int64_t ts = chrono_timestamp_ns() + time_s_to_ns(newPose.poseTimeOffset);
  
 -	m_relation_history_push(relation_hist, &relation, ts);
 +	// Keep the transform tied to the latest accepted history sample.
@@ -125,9 +131,10 @@ diff --git a/src/xrt/drivers/steamvr_lh/device.cpp b/src/xrt/drivers/steamvr_lh/
  
  vr::ETrackedPropertyError
 diff --git a/src/xrt/drivers/steamvr_lh/device.hpp b/src/xrt/drivers/steamvr_lh/device.hpp
+index f0d9ab65c..41cd4f1e4 100644
 --- a/src/xrt/drivers/steamvr_lh/device.hpp
 +++ b/src/xrt/drivers/steamvr_lh/device.hpp
-@@ -131,6 +131,9 @@
+@@ -131,6 +131,9 @@ protected:
  	handle_property_write(const vr::PropertyWrite_t &prop);
  
  private:
@@ -137,3 +144,5 @@ diff --git a/src/xrt/drivers/steamvr_lh/device.hpp b/src/xrt/drivers/steamvr_lh/
  	vr::ITrackedDeviceServerDriver *driver;
  
  	void
+-- 
+2.56.0
