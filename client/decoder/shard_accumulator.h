@@ -48,7 +48,6 @@ public:
 	using data_shard = wivrn::to_headset::video_stream_data_shard;
 	struct shard_set
 	{
-		size_t min_for_reconstruction = -1;
 		std::vector<std::optional<data_shard>> data;
 		void reset(uint64_t frame_index);
 		bool empty() const;
@@ -74,6 +73,7 @@ private:
 	shard_set next;
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
+	const bool allow_partial;
 
 public:
 	explicit shard_accumulator(
@@ -88,7 +88,8 @@ public:
 	        current(stream_index),
 	        next(stream_index),
 	        weak_scene(scene),
-	        instance(instance)
+	        instance(instance),
+	        allow_partial(description.codec[stream_index] == h264 || description.codec[stream_index] == h265)
 	{
 		next.reset(1);
 	}
@@ -107,9 +108,9 @@ public:
 	using blit_handle = decoder::blit_handle;
 
 private:
-	void try_submit_frame(std::optional<uint16_t> shard_idx);
-	void try_submit_frame(uint16_t shard_idx);
+	void try_submit_frame();
 	void send_feedback(wivrn::from_headset::feedback & feedback);
 	void advance();
+	void finish_current();
 };
 } // namespace wivrn

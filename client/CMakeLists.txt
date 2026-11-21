@@ -213,6 +213,16 @@ target_compile_definitions(wivrn-imgui PUBLIC IMGUI_ENABLE_FREETYPE)
 target_compile_features(wivrn-imgui PRIVATE cxx_std_23)
 target_link_libraries(wivrn-imgui FreetypeHarfbuzz Vulkan::Vulkan)
 
+if(WIVRN_BUILD_TEST AND NOT ANDROID)
+    enable_testing()
+    add_executable(wivrn-shard-accumulator-test tests/shard_accumulator.cpp decoder/shard_accumulator.cpp)
+    get_target_property(WIVRN_ACCUMULATOR_TEST_LIBRARIES wivrn LINK_LIBRARIES)
+    target_link_libraries(wivrn-shard-accumulator-test PRIVATE ${WIVRN_ACCUMULATOR_TEST_LIBRARIES})
+    target_include_directories(wivrn-shard-accumulator-test PRIVATE $<TARGET_PROPERTY:wivrn,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(wivrn-shard-accumulator-test PRIVATE $<TARGET_PROPERTY:wivrn,COMPILE_DEFINITIONS>)
+    add_test(NAME shard-accumulator COMMAND wivrn-shard-accumulator-test)
+endif()
+
 target_link_libraries(wivrn wivrn-imgui)
 
 

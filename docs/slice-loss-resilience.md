@@ -1,0 +1,144 @@
+# Slice loss resilience and FEC extension
+
+This branch changes the video wire protocol (revision 2 and a new automatic
+type hash). Install matching server and client builds. Older peers must fail
+the existing protocol compatibility check rather than interpret these packets.
+
+## Encoding and decoding
+
+H.264 and HEVC use a target of four slices. x264 uses four sliced encoding
+threads (the library can clamp this for small images); NVENC uses slice mode 3;
+VAAPI requests four slices through AVCodecContext and accepts existing backend
+options. Vulkan H.264 clamps the count to macroblock rows and maxSliceCount.
+Vulkan HEVC also checks multipleSliceSegmentsPerTile and maxSliceSegmentCount,
+and otherwise keeps one slice. Driver support is still required, particularly
+for VAAPI. AV1 tiles and raw image partial decoding are outside this change.
+
+The shared sender splits Annex B H.264/HEVC access units at NAL boundaries,
+including encoder backends returning multiple NALs in one buffer. A source
+packet never crosses a NAL boundary. x264's existing NAL callback uses the same
+sender. Parameter sets and IDRs retain the backend's existing reliable delivery
+policy. This also fixes x264's reordered callback path losing its reliable
+delivery preference.
+
+Every packet repeats view metadata and a unit descriptor. Losing the first
+packet no longer loses the poses needed to display the frame. Timing remains
+on the last packet. The maximum serialized video packet, including its variant
+tag and optional metadata, is 1400 bytes before transport encryption. With the
+current layout the conservative source symbol capacity is 1234 bytes, verified
+by the video-wire test. Repeating view metadata costs bandwidth but avoids a separate
+reliable per-frame metadata dependency.
+
+The receiver buffers two frames. Complete access units are submitted immediately
+and exactly once. When the following frame is complete, or a packet two frames
+ahead arrives, an incomplete current frame is closed using only whole NALs.
+Missing the final packet therefore does not prevent eventual submission. This
+is a frame-progress deadline, not a wall-clock timer: if transmission stops,
+there is no independent timer to flush its final incomplete frame. Late packets
+for retired frames and duplicate source packets are ignored.
+
+Partial submission requires H.264/HEVC and at least one complete VCL NAL.
+Incomplete NALs contribute no bytes, including when their initial or final
+symbol is missing. AV1/raw still require a complete frame. A completely lost
+frame or a frame with no intact slices cannot be displayed by this mechanism.
+Submitting an access unit means `push_data(..., partial=false)` followed by
+`frame_completed`; it does not flush or reset the codec between pictures.
+
+Iris CAPTURE buffers flagged ERROR are accepted for intentionally incomplete
+access units when the driver returns nonempty image data. Unexpected ERROR
+buffers remain discarded and now request reference recovery. FFmpeg permits
+corrupt/concealed output. Android receives a closed access unit through its
+existing MediaCodec path; its concealment behavior needs device validation.
+
+`feedback.stream_corrupted` records partial input or a reported decoding error.
+`sent_to_decoder` continues to record actual submission, and
+`received_last_packet` stays zero for incomplete input. Default IDR handling
+requests a clean IDR for damaged reference frames; Vulkan reference management
+does not acknowledge partial frames as clean references. Concealment can still
+propagate errors through inter-frame prediction until recovery.
+
+## Wire layout and planned parity
+
+Existing `stream_item_idx`, `frame_idx`, and frame-wide `shard_idx` are retained.
+Every source packet now includes this descriptor:
+
+| Field | Meaning |
+| --- | --- |
+| unit_idx (u16) | NAL/access-unit identifier within the stream frame |
+| first_shard (u16) | First frame-wide source index of this unit |
+| shard_count (u16) | Number of source symbols in this unit |
+| byte_count (u32) | Original NAL length, including its Annex B start code |
+| symbol_size (u16) | Capacity of every source symbol except its shorter tail |
+| vcl (bool) | Unit carries an independently framed video slice |
+
+Descriptors and symbol lengths are validated before allocation/insertion and
+again before assembly. The final symbol length is derived from byte_count;
+conflicting descriptors or incomplete units cannot be concatenated into the
+decoder input.
+
+**Parity generation and recovery are not implemented in this branch.** The next
+step can introduce a separate parity packet variant keyed by
+`(stream_item_idx, frame_idx, unit_idx)` without changing source shard numbering.
+That packet should repeat the source descriptor, codec configuration/view
+metadata as necessary, a FEC scheme/version, and a repair-symbol index. Keep
+repair indices separate from frame-wide source shard indices, and do not count
+parity packets when deciding whether a frame is complete.
+
+For a first XOR scheme, zero-pad all symbols to symbol_size and transmit one
+XOR repair symbol per unit. Recover exactly one missing source symbol, trim its
+tail using byte_count, validate its descriptor, then insert it into the same
+source-shard slot before complete-NAL selection. A single parity symbol cannot
+repair two erasures in one unit. Large NALs should be split into bounded FEC
+groups with an explicit group identifier/source range; this bounds parity
+overhead, recovery work and buffering. More general erasure coding can use the
+same source/repair distinction. Repair packets must fit the wire budget; split
+repair data or reduce the source symbol capacity to accommodate their header.
+
+Recovery must happen inside the existing frame-progress window, without
+waiting for parity or retransmission before retiring a stale frame. Preserve
+duplicate/late-packet handling, reject mismatched group metadata, cap recovery
+work, and add separate feedback for recovered and unrecoverable source symbols.
+Only a fully recovered original access unit should clear stream_corrupted.
+
+## Validation and remaining hardware work
+
+The supplied `../log/wivrn_steamframe_slice_reference` reports Iris concealing
+a removed H.264 slice and outputting 120/120 frames. It does not establish HEVC,
+AV1, IDR-loss or arbitrary driver behavior. The supplied packet audit contains
+253,616 frame records, of which 9,017 have complete=false; these are per-stream
+records, not a measured aggregate UDP packet-loss rate.
+
+With WIVRN_BUILD_TEST enabled:
+
+- video-units checks NAL boundaries, out-of-order/duplicate delivery, every
+  source-symbol loss position, whole-NAL loss and malformed descriptors.
+- video-wire checks serialization round trips, corruption feedback and the
+  complete 1400-byte packet budget.
+- video-slice-decode is built when libavcodec/libavutil/x264 are available. It
+  generates 120 moving, four-slice H.264 pictures, drops one symbol in the
+  second slice of picture 40, reconstructs using the actual unit selector and
+  verifies that software decoding still returns all 120 pictures, including 40.
+- shard-accumulator is built with the desktop client and exercises the actual
+  two-frame receiver with a recording decoder and clock. It covers reordered
+  and duplicate packets, first/final packet loss, consecutive damaged frames,
+  frame gaps, late packets, view metadata and the AV1/raw complete-frame policy.
+
+Run the registered tests from the build tree's common and client directories:
+
+```sh
+ctest --test-dir BUILD_DIR/common -R 'video-' --output-on-failure
+ctest --test-dir BUILD_DIR/client -R shard-accumulator --output-on-failure
+```
+
+Before deployment, validate actual WiVRn on Steam Frame and Android: first,
+middle and last slice loss; missing first/final frame packet; IDR loss; burst
+loss; pose/PTS correspondence; HEVC; and post-loss reference recovery. Compare
+decoded pixels with a lossless transport run and measure display latency,
+bitrate overhead and encoder throughput. Software decoding and compilation do
+not establish hardware quality or latency.
+
+Implementation references:
+[Vulkan H.264 picture info](https://docs.vulkan.org/refpages/latest/refpages/source/VkVideoEncodeH264PictureInfoKHR.html),
+[Vulkan HEVC capabilities](https://docs.vulkan.org/refpages/latest/refpages/source/VkVideoEncodeH265CapabilityFlagBitsKHR.html),
+[NVENC guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/nvenc-video-encoder-api-prog-guide/),
+[V4L2 stateful decoder API](https://docs.kernel.org/userspace-api/media/v4l/dev-decoder.html).

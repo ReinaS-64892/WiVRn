@@ -220,6 +220,9 @@ std::unique_ptr<wivrn::video_encoder_vulkan_h264> wivrn::video_encoder_vulkan_h2
 	auto [video_caps, encode_caps, encode_h264_caps, video_profile_info] = get_video_caps(vk.physical_device);
 
 	std::unique_ptr<video_encoder_vulkan_h264> self(new video_encoder_vulkan_h264(vk, video_caps, encode_caps, stream_idx, settings));
+	const auto count = std::min({4u, encode_h264_caps.maxSliceCount, (uint32_t(settings.height) + 15) / 16});
+	self->slice_headers.resize(count);
+	self->nalu_slice_infos.resize(count);
 
 	vk::VideoEncodeH264SessionParametersAddInfoKHR h264_add_info{};
 	h264_add_info.setStdSPSs(self->sps);
@@ -287,7 +290,7 @@ void wivrn::video_encoder_vulkan_h264::send_idr_data()
 
 void * wivrn::video_encoder_vulkan_h264::encode_info_next(uint32_t frame_num, size_t slot, std::optional<int32_t> ref_slot)
 {
-	slice_header = {
+	StdVideoEncodeH264SliceHeader slice_header = {
 	        .flags =
 	                {
 	                        .direct_spatial_mv_pred_flag = 0, //?
@@ -305,9 +308,14 @@ void * wivrn::video_encoder_vulkan_h264::encode_info_next(uint32_t frame_num, si
 	        .disable_deblocking_filter_idc = STD_VIDEO_H264_DISABLE_DEBLOCKING_FILTER_IDC_DISABLED,
 	        .pWeightTable = nullptr,
 	};
-	nalu_slice_info = vk::VideoEncodeH264NaluSliceInfoKHR{
-	        .pStdSliceHeader = &slice_header,
-	};
+	const uint32_t rows = (extent.height + 15) / 16;
+	const uint32_t columns = (extent.width + 15) / 16;
+	for (size_t i = 0; i < slice_headers.size(); ++i)
+	{
+		slice_headers[i] = slice_header;
+		slice_headers[i].first_mb_in_slice = (i * rows / slice_headers.size()) * columns;
+		nalu_slice_infos[i] = vk::VideoEncodeH264NaluSliceInfoKHR{.pStdSliceHeader = &slice_headers[i]};
+	}
 	reference_lists_info = {
 	        .flags =
 	                {
@@ -355,8 +363,8 @@ void * wivrn::video_encoder_vulkan_h264::encode_info_next(uint32_t frame_num, si
 	        .pRefLists = &reference_lists_info,
 	};
 	picture_info = vk::VideoEncodeH264PictureInfoKHR{
-	        .naluSliceEntryCount = 1,
-	        .pNaluSliceEntries = &nalu_slice_info,
+	        .naluSliceEntryCount = uint32_t(nalu_slice_infos.size()),
+	        .pNaluSliceEntries = nalu_slice_infos.data(),
 	        .pStdPictureInfo = &std_picture_info,
 	        .generatePrefixNalu = false, // check if useful, check if supported
 	};

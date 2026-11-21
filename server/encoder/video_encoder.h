@@ -104,6 +104,7 @@ private:
 
 	to_headset::video_stream_data_shard::timing_info_t timing_info;
 	clock_offset clock;
+	uint32_t unit_index = 0;
 
 	std::ofstream video_dump;
 
@@ -113,6 +114,7 @@ protected:
 	std::atomic_uint32_t pending_bitrate;
 	std::atomic<float> pending_framerate;
 	std::unique_ptr<idr_handler> idr;
+	const video_codec codec;
 	const vk::Extent2D extent;
 
 public:

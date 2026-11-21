@@ -45,8 +45,8 @@ class video_encoder_vulkan_h265 : public video_encoder_vulkan
 
 	StdVideoH265ShortTermRefPicSet st_rps{};
 
-	StdVideoEncodeH265SliceSegmentHeader slice_header{};
-	vk::VideoEncodeH265NaluSliceSegmentInfoKHR nalu_slice_info{};
+	std::vector<StdVideoEncodeH265SliceSegmentHeader> slice_headers;
+	std::vector<vk::VideoEncodeH265NaluSliceSegmentInfoKHR> nalu_slice_infos;
 
 	StdVideoEncodeH265ReferenceListsInfo reference_lists_info{};
 	StdVideoEncodeH265PictureInfo std_picture_info{};

@@ -272,6 +272,8 @@ video_encoder_nvenc::video_encoder_nvenc(
 			if (bitDepth != NV_ENC_BIT_DEPTH_8)
 				throw std::runtime_error("nvenc: selected codec only supports 8-bit encoding");
 
+			config.encodeCodecConfig.h264Config.sliceMode = 3;
+			config.encodeCodecConfig.h264Config.sliceModeData = 4;
 			config.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
 			config.encodeCodecConfig.h264Config.maxNumRefFrames = 0;
 			config.encodeCodecConfig.h264Config.h264VUIParameters.videoFullRangeFlag = 1;
@@ -289,6 +291,8 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.hevcConfig.inputBitDepth = bitDepth;
 			config.encodeCodecConfig.hevcConfig.outputBitDepth = bitDepth;
 
+			config.encodeCodecConfig.hevcConfig.sliceMode = 3;
+			config.encodeCodecConfig.hevcConfig.sliceModeData = 4;
 			config.encodeCodecConfig.hevcConfig.repeatSPSPPS = 1;
 			config.encodeCodecConfig.hevcConfig.maxNumRefFramesInDPB = 0;
 			config.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFullRangeFlag = 1;

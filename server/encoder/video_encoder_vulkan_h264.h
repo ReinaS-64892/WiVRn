@@ -32,8 +32,8 @@ class video_encoder_vulkan_h264 : public video_encoder_vulkan
 	StdVideoH264SequenceParameterSet sps;
 	StdVideoH264PictureParameterSet pps;
 
-	StdVideoEncodeH264SliceHeader slice_header;
-	vk::VideoEncodeH264NaluSliceInfoKHR nalu_slice_info;
+	std::vector<StdVideoEncodeH264SliceHeader> slice_headers;
+	std::vector<vk::VideoEncodeH264NaluSliceInfoKHR> nalu_slice_infos;
 
 	StdVideoEncodeH264PictureInfo std_picture_info;
 	vk::VideoEncodeH264PictureInfoKHR picture_info;

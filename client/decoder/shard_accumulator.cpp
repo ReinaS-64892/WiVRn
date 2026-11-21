@@ -36,7 +36,6 @@ shard_set::shard_set(uint8_t stream_index)
 
 void shard_set::reset(uint64_t frame_index)
 {
-	min_for_reconstruction = -1;
 	data.clear();
 
 	uint8_t stream_index = feedback.stream_index;
@@ -65,6 +64,10 @@ static bool is_complete(const shard_set & shards)
 
 std::optional<uint16_t> shard_set::insert(data_shard && shard, xr::instance & instance)
 {
+	// A source symbol must belong to the range advertised by its unit.
+	const auto & unit = shard.unit;
+	if (!valid_video_symbol(unit, shard.shard_idx, shard.payload.size()))
+		return {};
 	if (empty())
 		feedback.received_first_packet = instance.now();
 
@@ -121,36 +124,32 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 	}
 	else if (frame_diff == 0)
 	{
-		auto shard_idx = current.insert(std::move(shard), instance);
-		try_submit_frame(shard_idx);
+		if (current.insert(std::move(shard), instance))
+			try_submit_frame();
 	}
 	else if (frame_diff == 1)
 	{
 		next.insert(std::move(shard), instance);
 		if (is_complete(next))
 		{
-			debug_why_not_sent(current);
-			send_feedback(current.feedback);
-
+			finish_current();
 			advance();
-
-			try_submit_frame(0);
+			try_submit_frame();
 		}
 	}
 	else if (frame_diff == 2)
 	{
-		debug_why_not_sent(current);
-		send_feedback(current.feedback);
-
+		finish_current();
 		advance();
-
+		try_submit_frame();
 		push_shard(std::move(shard));
 	}
 	else
 	{
 		// We have lost more than one frame
-		send_feedback(current.feedback);
-		send_feedback(next.feedback);
+		finish_current();
+		advance();
+		finish_current();
 
 		current.reset(shard.frame_idx);
 		next.reset(shard.frame_idx + 1);
@@ -159,63 +158,60 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 	}
 }
 
-void shard_accumulator::try_submit_frame(std::optional<uint16_t> shard_idx)
+void shard_accumulator::try_submit_frame()
 {
-	if (shard_idx)
-		try_submit_frame(*shard_idx);
+	// Submit each access unit exactly once; never leave a truncated NAL buffered
+	// in a decoder while waiting for a lost UDP packet.
+	if (!is_complete(current))
+		return;
+	finish_current();
+	advance();
+	if (is_complete(current))
+	{
+		finish_current();
+		advance();
+	}
 }
 
-void shard_accumulator::try_submit_frame(uint16_t shard_idx)
+void shard_accumulator::finish_current()
 {
-	auto & data_shards = current.data;
+	auto payload = complete_video_units(current.data);
+	const bool complete = is_complete(current) && payload.spans.size() == current.data.size();
+	if (!complete)
+		debug_why_not_sent(current);
 
-	for (size_t idx = 0; idx < shard_idx; ++idx)
-		if (not data_shards[idx])
-			return;
-
-	uint16_t last_idx = shard_idx + 1;
-	for (size_t size = data_shards.size();
-	     last_idx < size and data_shards[last_idx];
-	     ++last_idx)
+	std::optional<data_shard::view_info_t> view;
+	for (const auto & shard: current.data)
 	{
+		if (!shard)
+			continue;
+		if (shard->view_info)
+			view = shard->view_info;
+		if (shard->timing_info)
+		{
+			const auto & timing = *shard->timing_info;
+			current.feedback.encode_begin = timing.encode_begin;
+			current.feedback.encode_end = timing.encode_end;
+			current.feedback.send_begin = timing.send_begin;
+			current.feedback.send_end = timing.send_end;
+		}
 	}
+	current.feedback.stream_corrupted = !complete;
+	if (complete)
+		current.feedback.received_last_packet = instance.now();
 
-	std::vector<std::span<const uint8_t>> payload;
-	payload.reserve(last_idx - shard_idx);
-	for (size_t idx = shard_idx; idx < last_idx; ++idx)
-		payload.emplace_back(data_shards[idx]->payload);
-
-	bool frame_complete = last_idx == data_shards.size() and data_shards.back()->timing_info;
-	decoder_->push_data(payload, data_shards[shard_idx]->frame_idx, not frame_complete);
-
-	if (not frame_complete)
-		return;
-
-	current.feedback.received_last_packet = instance.now();
-	current.feedback.sent_to_decoder = current.feedback.received_last_packet;
-	data_shard::timing_info_t timing_info = data_shards.back()->timing_info.value_or(data_shard::timing_info_t{});
-	current.feedback.encode_begin = timing_info.encode_begin;
-	current.feedback.encode_end = timing_info.encode_end;
-	current.feedback.send_begin = timing_info.send_begin;
-	current.feedback.send_end = timing_info.send_end;
-
-	if (not data_shards.front()->view_info)
+	if (view && !payload.spans.empty() && (complete || (allow_partial && payload.has_vcl)))
 	{
-		spdlog::warn("first shard has no view_info");
-		return;
+		current.feedback.sent_to_decoder = instance.now();
+		decoder_->push_data(payload.spans, current.frame_index(), false);
+		decoder_->frame_completed(current.feedback, *view);
 	}
-
-	// Try to extract a frame
-	decoder_->frame_completed(current.feedback, *data_shards.front()->view_info);
-
 	send_feedback(current.feedback);
-
-	advance();
 }
 
 void shard_accumulator::send_feedback(wivrn::from_headset::feedback & feedback)
 {
-	if (not feedback.received_last_packet)
+	if (not feedback.received_first_packet)
 		feedback.received_first_packet = instance.now();
 	auto scene = weak_scene.lock();
 	if (scene)

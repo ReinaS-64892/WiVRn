@@ -963,21 +963,28 @@ void decoder::drain_capture()
 		}
 
 		const uint64_t timestamp = timestamp_to_u64(buf.timestamp);
-		if (!(buf.flags & V4L2_BUF_FLAG_ERROR))
-		{
-			submit_capture(buf.index, timestamp);
-		}
-		else
+		if (buf.flags & V4L2_BUF_FLAG_ERROR)
 		{
 			spdlog::warn("iris decoder returned CAPTURE buffer {} with V4L2_BUF_FLAG_ERROR", buf.index);
-			if (timestamp)
+			auto it = std::ranges::find(pending_frames, timestamp, &pending_frame::timestamp);
+			// Iris can return a concealed picture for an intentionally incomplete
+			// access unit. Keep it so intact slices still update the display.
+			const bool concealed = it != pending_frames.end() && it->feedback.stream_corrupted && planes[0].bytesused;
+			if (!concealed)
 			{
-				auto it = std::ranges::find(pending_frames, timestamp, &pending_frame::timestamp);
 				if (it != pending_frames.end())
+				{
+					auto feedback = it->feedback;
+					feedback.stream_corrupted = true;
+					if (auto scene = weak_scene.lock())
+						scene->send_feedback(feedback);
 					pending_frames.erase(it);
+				}
+				queue_capture_buffer(buf.index);
+				continue;
 			}
-			queue_capture_buffer(buf.index);
 		}
+		submit_capture(buf.index, timestamp);
 	}
 }
 

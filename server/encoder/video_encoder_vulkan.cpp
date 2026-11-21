@@ -50,14 +50,14 @@ public:
 
 	void on_feedback(const wivrn::from_headset::feedback & feedback) override
 	{
-		if (feedback.sent_to_decoder)
+		if (feedback.sent_to_decoder || feedback.stream_corrupted)
 		{
 			std::unique_lock lock(mutex);
 			for (auto & item: items)
 			{
 				if (item.frame_index == feedback.frame_index)
 				{
-					item.acked = true;
+					item.acked = feedback.sent_to_decoder && !feedback.stream_corrupted;
 					return;
 				}
 			}

@@ -33,7 +33,7 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 	                   [this, &f](wait_idr_feedback s) {
 		                   if (f.frame_index == s.idr_id)
 		                   {
-			                   if (f.sent_to_decoder)
+			                   if (f.sent_to_decoder && !f.stream_corrupted)
 			                   {
 				                   U_LOG_D("IDR frame received, stream %d", f.stream_index);
 				                   state = running{f.frame_index};
@@ -46,7 +46,7 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 		                   }
 	                   },
 	                   [this, &f](running & r) {
-		                   if (not f.sent_to_decoder and f.frame_index >= r.last_ack and not is_non_ref_frame(f.frame_index))
+		                   if ((!f.sent_to_decoder || f.stream_corrupted) and f.frame_index >= r.last_ack and not is_non_ref_frame(f.frame_index))
 		                   {
 			                   U_LOG_I("IDR frame needed on stream %d", f.stream_index);
 			                   U_LOG_D("frame_idx: %ld, last_ack = %ld",

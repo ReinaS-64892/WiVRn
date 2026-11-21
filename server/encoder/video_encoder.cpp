@@ -200,6 +200,7 @@ video_encoder::video_encoder(vk_bundle & vk,
         bitrate_multiplier(settings.bitrate_multiplier),
         shared_sender(async_send ? sender::get() : nullptr),
         idr(std::move(idr)),
+        codec(settings.codec),
         extent{
                 .width = settings.width,
                 .height = settings.height,
@@ -285,6 +286,7 @@ void video_encoder::encode(wivrn_session & cnx,
 	shard.stream_item_idx = stream_idx;
 	shard.frame_idx = frame_index;
 	shard.shard_idx = 0;
+	unit_index = 0;
 	shard.view_info = view_info;
 	shard.timing_info.reset();
 
@@ -315,40 +317,63 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 	if (video_dump)
 		video_dump.write((char *)data.data(), data.size());
 
-	ssize_t max_payload_size = (cnx->has_stream() and not control) ? to_headset::video_stream_data_shard::max_payload_size : std::numeric_limits<uint32_t>::max();
-
-	auto begin = data.begin();
-	auto end = data.end();
-	while (begin != end)
+	// H.264/HEVC encoder backends may return an entire access unit. Split it
+	// into NALs here as well as for x264's per-NAL callbacks.
+	auto units = (codec == h264 || codec == h265) ? annex_b_units(data) : std::vector{data};
+	for (size_t unit_idx = 0; unit_idx < units.size(); ++unit_idx)
 	{
-		const size_t payload_size = std::max(0z, max_payload_size - ssize_t(serialized_size(shard.view_info)));
-		auto next = std::min(end, begin + payload_size);
-		if (next == end)
+		auto bytes = units[unit_idx];
+		if (bytes.empty())
+			continue;
+		bool vcl = false;
+		if (codec == h264 || codec == h265)
 		{
-			if (end_of_frame)
+			const size_t prefix = annex_b_prefix(bytes);
+			if (prefix < bytes.size())
 			{
-				if (serialized_size(timing_info) + std::distance(begin, next) <= max_payload_size)
-					shard.timing_info = timing_info;
-				else
-					--next;
+				const auto type = codec == h264 ? bytes[prefix] & 0x1f : (bytes[prefix] >> 1) & 0x3f;
+				vcl = codec == h264 ? type == 1 || type == 5 : type <= 31;
 			}
 		}
-		shard.payload = {begin, next};
-		try
+		// Reserve worst-case metadata, even on non-final packets. Fixed source
+		// symbol capacity and exact byte_count also permit future per-unit FEC.
+		shard.payload = {};
+		shard.timing_info = timing_info;
+		const size_t capacity = to_headset::video_stream_data_shard::max_payload_size - serialized_size(shard) - 1;
+		shard.timing_info.reset();
+		const size_t count = (bytes.size() + capacity - 1) / capacity;
+		if (unit_index > UINT16_MAX || size_t(shard.shard_idx) + count > UINT16_MAX || bytes.size() > UINT32_MAX)
+			throw std::runtime_error("Video frame exceeds shard index range");
+		shard.unit = {
+		        .unit_idx = uint16_t(unit_index++),
+		        .first_shard = shard.shard_idx,
+		        .shard_count = uint16_t(count),
+		        .byte_count = uint32_t(bytes.size()),
+		        .symbol_size = uint16_t(capacity),
+		        .vcl = vcl,
+		};
+		while (!bytes.empty())
 		{
-			if (control)
-				cnx->send_control(to_headset::video_stream_data_shard{shard});
-			else
-				cnx->send_stream(to_headset::video_stream_data_shard{shard});
+			const size_t size = std::min(bytes.size(), capacity);
+			if (end_of_frame && unit_idx + 1 == units.size() && size == bytes.size())
+				shard.timing_info = timing_info;
+			shard.payload = bytes.first(size);
+			try
+			{
+				if (control)
+					cnx->send_control(to_headset::video_stream_data_shard{shard});
+				else
+					cnx->send_stream(to_headset::video_stream_data_shard{shard});
+			}
+			catch (...)
+			{
+				// Ignore network errors
+			}
+			++shard.shard_idx;
+			bytes = bytes.subspan(size);
 		}
-		catch (...)
-		{
-			// Ignore network errors
-		}
-		++shard.shard_idx;
-		shard.view_info.reset();
-		begin = next;
 	}
+
 	if (end_of_frame)
 		wivrn::trace::cpu_end(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
 }

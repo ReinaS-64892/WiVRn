@@ -248,11 +248,13 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 	switch (settings.codec)
 	{
 		case video_codec::h264:
+			encoder_ctx->slices = 4;
 			encoder_ctx->profile = AV_PROFILE_H264_CONSTRAINED_BASELINE;
 			av_dict_set(&opts, "coder", "cavlc", 0);
 			av_dict_set(&opts, "rc_mode", "CBR", 0);
 			break;
 		case video_codec::h265:
+			encoder_ctx->slices = 4;
 			// bit_depth is either 8 or 10 here
 			encoder_ctx->profile = settings.bit_depth == 10 ? AV_PROFILE_HEVC_MAIN_10 : AV_PROFILE_HEVC_MAIN;
 			break;

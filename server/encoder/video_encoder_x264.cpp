@@ -66,7 +66,7 @@ void video_encoder_x264::ProcessNal(pending_nal && nal)
 	while ((not pending_nals.empty()) and pending_nals.front().first_mb == next_mb)
 	{
 		next_mb = pending_nals.front().last_mb + 1;
-		SendData(pending_nals.front().data, next_mb == num_mb);
+		SendData(pending_nals.front().data, next_mb == num_mb, control);
 		pending_nals.pop_front();
 	}
 }
@@ -137,8 +137,10 @@ video_encoder_x264::video_encoder_x264(
 
 	x264_param_default_preset(&param, "ultrafast", "zerolatency");
 	param.nalu_process = &ProcessCb;
-	// param.i_slice_max_size = 1300;
-	param.i_slice_count = 32;
+	// Independently framed slices localize loss to a horizontal band.
+	param.i_slice_count = 4;
+	// Sliced threading otherwise replaces the requested count with auto threads.
+	param.i_threads = 4;
 	param.i_width = extent.width;
 	param.i_height = extent.height;
 	param.i_log_level = X264_LOG_WARNING;

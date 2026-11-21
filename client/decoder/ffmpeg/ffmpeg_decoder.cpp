@@ -175,6 +175,9 @@ decoder::decoder(
 	}
 
 	codec.reset(avcodec_alloc_context3(avcodec));
+	// Permit the decoder to return concealed pictures from incomplete slices.
+	codec->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+	codec->err_recognition = AV_EF_CAREFUL;
 
 	int ret = avcodec_open2(codec.get(), avcodec, nullptr);
 	if (ret < 0)

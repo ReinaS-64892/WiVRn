@@ -310,6 +310,12 @@ std::unique_ptr<wivrn::video_encoder_vulkan_h265> wivrn::video_encoder_vulkan_h2
 	}
 
 	const uint32_t log2_ctb_size = find_msb((uint32_t)encode_h265_caps.ctbSizes) + 4;
+	const uint32_t rows = (uint32_t(settings.height) + (1u << log2_ctb_size) - 1) >> log2_ctb_size;
+	const auto count = (encode_h265_caps.flags & vk::VideoEncodeH265CapabilityFlagBitsKHR::eMultipleSliceSegmentsPerTile)
+	                           ? std::min({4u, encode_h265_caps.maxSliceSegmentCount, rows})
+	                           : 1u;
+	self->slice_headers.resize(count);
+	self->nalu_slice_infos.resize(count);
 	self->sps.log2_min_luma_coding_block_size_minus3 = 1;
 	self->sps.log2_diff_max_min_luma_coding_block_size = log2_ctb_size - 4;
 	self->sps.log2_min_luma_transform_block_size_minus2 = find_lsb((uint32_t)encode_h265_caps.transformBlockSizes);
@@ -373,7 +379,7 @@ void wivrn::video_encoder_vulkan_h265::send_idr_data()
 
 void * wivrn::video_encoder_vulkan_h265::encode_info_next(uint32_t frame_num, size_t slot, std::optional<int32_t> ref_slot)
 {
-	slice_header = {
+	StdVideoEncodeH265SliceSegmentHeader slice_header = {
 	        .flags = {
 	                .first_slice_segment_in_pic_flag = 1,
 	                .slice_sao_luma_flag = sample_adaptive_offset_enabled,
@@ -384,10 +390,17 @@ void * wivrn::video_encoder_vulkan_h265::encode_info_next(uint32_t frame_num, si
 	        .slice_type = ref_slot ? STD_VIDEO_H265_SLICE_TYPE_P : STD_VIDEO_H265_SLICE_TYPE_I,
 	        .MaxNumMergeCand = 5,
 	};
-	nalu_slice_info = vk::VideoEncodeH265NaluSliceSegmentInfoKHR{
-	        .constantQp = 0,
-	        .pStdSliceSegmentHeader = &slice_header,
-	};
+	const uint32_t log2_ctb = sps.log2_min_luma_coding_block_size_minus3 + 3 + sps.log2_diff_max_min_luma_coding_block_size;
+	const uint32_t ctb_size = 1u << log2_ctb;
+	const uint32_t rows = (extent.height + ctb_size - 1) / ctb_size;
+	const uint32_t columns = (extent.width + ctb_size - 1) / ctb_size;
+	for (size_t i = 0; i < slice_headers.size(); ++i)
+	{
+		slice_headers[i] = slice_header;
+		slice_headers[i].flags.first_slice_segment_in_pic_flag = i == 0;
+		slice_headers[i].slice_segment_address = (i * rows / slice_headers.size()) * columns;
+		nalu_slice_infos[i] = vk::VideoEncodeH265NaluSliceSegmentInfoKHR{.pStdSliceSegmentHeader = &slice_headers[i]};
+	}
 	reference_lists_info = {
 	        .flags = {.ref_pic_list_modification_flag_l0 = 0, .ref_pic_list_modification_flag_l1 = 0},
 	        .num_ref_idx_l0_active_minus1 = 0,
@@ -463,8 +476,8 @@ void * wivrn::video_encoder_vulkan_h265::encode_info_next(uint32_t frame_num, si
 	};
 
 	picture_info = vk::VideoEncodeH265PictureInfoKHR{
-	        .naluSliceSegmentEntryCount = 1,
-	        .pNaluSliceSegmentEntries = &nalu_slice_info,
+	        .naluSliceSegmentEntryCount = uint32_t(nalu_slice_infos.size()),
+	        .pNaluSliceSegmentEntries = nalu_slice_infos.data(),
 	        .pStdPictureInfo = &std_picture_info,
 	};
 

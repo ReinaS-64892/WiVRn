@@ -36,12 +36,13 @@
 #include "packed_quaternion.h"
 #include "port_forwarding.h"
 #include "smp.h"
+#include "video_units.h"
 #include "wivrn_serialization_types.h"
 
 namespace wivrn
 {
 
-static constexpr int protocol_revision = 1;
+static constexpr int protocol_revision = 2;
 
 enum class device_id : uint8_t
 {
@@ -670,6 +671,8 @@ struct feedback
 	XrTime displayed;
 
 	uint8_t times_displayed;
+	// A concealed frame may be displayed, but must not acknowledge a clean reference.
+	bool stream_corrupted = false;
 };
 
 struct battery
@@ -864,8 +867,9 @@ public:
 	uint64_t frame_idx;
 	// Identifier of the shard within the frame
 	uint16_t shard_idx;
+	video_unit_info unit{};
 
-	// Position information, must be present on first video shard
+	// Repeated on every shard, allowing loss of the first packet of a frame.
 	struct view_info_t
 	{
 		// ns in headset time referential
