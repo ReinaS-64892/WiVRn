@@ -99,6 +99,10 @@ public:
 	{
 		return decoder_->sampler();
 	}
+	bool needs_manual_linear_filtering() const
+	{
+		return decoder_->needs_manual_linear_filtering();
+	}
 
 	using blit_handle = decoder::blit_handle;
 

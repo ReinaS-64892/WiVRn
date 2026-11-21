@@ -97,6 +97,7 @@ private:
 	vk::raii::SamplerYcbcrConversion ycbcr_conversion = nullptr;
 	vk::raii::Sampler ycbcr_sampler = nullptr;
 	vk::Format capture_vk_format = vk::Format::eUndefined;
+	vk::Filter sampling_filter = vk::Filter::eNearest;
 
 	wivrn::fd_base fd;
 	std::vector<output_buffer> output_buffers;
@@ -175,6 +176,7 @@ public:
 	{
 		return *ycbcr_sampler;
 	}
+	bool needs_manual_linear_filtering() const override { return sampling_filter == vk::Filter::eNearest; }
 
 	static bool available_for(wivrn::video_codec codec);
 	static bool supports_10bit(wivrn::video_codec codec);

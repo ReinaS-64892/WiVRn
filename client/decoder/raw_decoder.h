@@ -80,6 +80,7 @@ public:
 	{
 		return *sampler_;
 	}
+	bool needs_manual_linear_filtering() const override { return true; }
 
 	static std::vector<wivrn::video_codec> supported_codecs();
 
