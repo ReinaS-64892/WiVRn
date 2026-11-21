@@ -733,6 +733,19 @@ void settings_system(const settings_context & ctx)
 	auto & default_config = ctx.default_config;
 	std::vector<setting> list;
 
+	list.push_back({
+	        .id = "##presence_debounce",
+	        .label = _C("setting name", "HMD removal delay"),
+	        .description = _("Ignore brief headset removal signals before reporting the HMD as not worn."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(config.user_presence_debounce_ms); },
+	        .set_int = [&config](int v) { config.user_presence_debounce_ms = uint32_t(v); config.save(); },
+	        .v_min = 0,
+	        .v_max = 1000,
+	        .fmt = "%d ms",
+	        .default_int = int(default_config.user_presence_debounce_ms),
+	});
+
 	auto language_name = [](const std::locale & loc = std::locale()) {
 		return boost::locale::pgettext("language selection, replace with the name of the language", "English", loc);
 	};

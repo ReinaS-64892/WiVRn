@@ -190,6 +190,7 @@ private:
 		system,
 	};
 	settings_page current_settings_page = settings_page::video;
+	std::optional<int64_t> pending_absence_time;
 
 	// Tab currently being displayed
 	stream_tab gui_status = stream_tab::hidden;
