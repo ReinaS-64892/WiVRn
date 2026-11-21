@@ -23,6 +23,7 @@
 #include "receive_time_budget.h"
 #include "wivrn_packets.h"
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -56,6 +57,7 @@ public:
 		std::optional<XrTime> deadline;
 		bool reliable = false;
 		XrTime assembled_at = 0;
+		XrDuration receive_limit = 0;
 		void reset(uint64_t frame_index);
 		bool empty() const;
 
@@ -109,6 +111,13 @@ private:
 	std::atomic<XrDuration> decode_budget = 4'000'000;
 	std::mutex statistics_mutex;
 	statistics pending_statistics;
+	struct retired_frame
+	{
+		uint64_t frame = 0;
+		XrTime first_packet = 0;
+		bool adaptive_expiry = false;
+	};
+	std::array<retired_frame, 64> retired_frames{};
 
 public:
 	explicit shard_accumulator(

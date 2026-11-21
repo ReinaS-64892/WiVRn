@@ -287,22 +287,22 @@ int main()
 	require(stats.complete == 1 && stats.incomplete == 0 && stats.expired == 0);
 	require(stats.wait_samples == 1 && stats.wait_sum == 1'000'000 && stats.wait_max == 1'000'000);
 	require(!complete.next_deadline());
-	// Fast intact UDP samples learn a 1.3x mean; slow outliers are excluded.
+	// Fast intact UDP samples learn a 1.5x mean; slow outliers are excluded.
 	wivrn::receive_time_budget learned(11'111'111);
 	for (int i = 0; i < 24; ++i)
 		learned.complete(2'000'000);
 	for (int i = 0; i < 8; ++i)
 		learned.complete(8'000'000);
-	require(learned.value() == 2'600'000);
+	require(learned.value() == 3'000'000);
 	for (int i = 0; i < 8; ++i)
 		learned.incomplete();
-	require(learned.value() == 4'000'000);
+	require(learned.value() == 4'500'000);
 	for (int i = 0; i < 64; ++i)
 		learned.incomplete();
 	require(learned.value() == 11'111'111);
 	for (int i = 0; i < 32; ++i)
 		learned.complete(2'000'000);
-	require(learned.value() == 2'600'000);
+	require(learned.value() == 3'000'000);
 
 	// Actual assembler follows the learned budget, not just the estimator.
 	recording = std::make_shared<recording_decoder>();
@@ -317,11 +317,47 @@ int main()
 		}
 		test_time += 9'000'000;
 	}
-	require(adaptive.current_receive_budget() == 2'600'000);
+	require(adaptive.current_receive_budget() == 3'000'000);
 	adaptive.push_shard(packet(132, 0));
-	require(adaptive.next_deadline() == test_time + 2'600'000);
+	require(adaptive.next_deadline() == test_time + 3'000'000);
 	test_time = *adaptive.next_deadline();
 	adaptive.expire(test_time);
+	test_time += 300'000;
+	adaptive.push_shard(packet(132, 1)); // 3.3 ms after the first packet
+	require(adaptive.current_receive_budget() == 3'800'000);
+	// A late duplicate of a complete frame must not inflate the timeout.
+	adaptive.push_shard(packet(131, 1));
+	require(adaptive.current_receive_budget() == 3'800'000);
+	// Preserve an earlier display deadline. Its late symbols do not train the
+	// UDP tail allowance, since a larger UDP cap would not have saved it.
+	auto display_limited = packet(133, 0);
+	display_limited.view_info->display_time = test_time + 7'000'000;
+	adaptive.push_shard(std::move(display_limited));
+	require(adaptive.next_deadline() == test_time + 1'000'000);
+	test_time = *adaptive.next_deadline();
+	adaptive.expire(test_time);
+	test_time += 4'000'000;
+	adaptive.push_shard(packet(133, 1));
+	require(adaptive.current_receive_budget() == 3'800'000);
+
+	// Late arrival evidence prevents isolated loss from being hidden by the
+	// old "eight consecutive losses" gate. A stalled outlier is bounded.
+	wivrn::receive_time_budget jitter(11'111'111);
+	for (int i = 0; i < 32; ++i)
+		jitter.complete(600'000);
+	require(jitter.value() == 2'000'000);
+	jitter.late(2'200'000);
+	require(jitter.value() == 2'700'000);
+	jitter.complete(600'000);
+	require(jitter.value() > 2'600'000); // one good frame cannot erase the tail
+	jitter.late(35'000'000);
+	require(jitter.value() == 4'000'000);
+	for (int i = 0; i < 128; ++i)
+		jitter.complete(600'000);
+	require(jitter.value() == 2'000'000);
+	wivrn::receive_time_budget high_fps(2'000'000);
+	high_fps.late(35'000'000);
+	require(high_fps.value() == 2'000'000);
 
 	// TCP recovery IDRs can finish beyond both the UDP and display deadlines.
 	// A fresh receiver accepts high server frame IDs after reconnect.

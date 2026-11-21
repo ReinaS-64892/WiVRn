@@ -43,6 +43,7 @@ void shard_set::reset(uint64_t frame_index)
 	deadline.reset();
 	reliable = false;
 	assembled_at = 0;
+	receive_limit = 0;
 
 	uint8_t stream_index = feedback.stream_index;
 	feedback = {};
@@ -78,6 +79,7 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDur
 	if (first)
 	{
 		feedback.received_first_packet = now;
+		receive_limit = max_wait;
 		deadline = now + max_wait;
 	}
 	if (reliable_transport && !reliable)
@@ -229,6 +231,12 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard, bool reliab
 	auto frame_diff = shard.frame_idx - current.frame_index();
 	if (shard.frame_idx < current.frame_index())
 	{
+		const auto & retired = retired_frames[shard.frame_idx % retired_frames.size()];
+		if (!reliable && retired.adaptive_expiry && retired.frame == shard.frame_idx)
+		{
+			assembly_budget.late(std::max<XrDuration>(0, now - retired.first_packet));
+			published_receive_budget.store(assembly_budget.value(), std::memory_order_relaxed);
+		}
 		// frame is in the past, drop it
 		std::lock_guard lock(statistics_mutex);
 		++pending_statistics.late_packets;
@@ -332,6 +340,11 @@ void shard_accumulator::finish_current(bool expired)
 	const auto budget = assembly_budget.value();
 	if (!current.reliable)
 	{
+		retired_frames[current.frame_index() % retired_frames.size()] = {
+		        .frame = current.frame_index(),
+		        .first_packet = current.feedback.received_first_packet,
+		        .adaptive_expiry = !complete && expired && current.deadline == current.feedback.received_first_packet + current.receive_limit,
+		};
 		if (complete)
 			assembly_budget.complete(std::max<XrDuration>(0, current.assembled_at - current.feedback.received_first_packet));
 		else

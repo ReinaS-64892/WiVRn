@@ -974,7 +974,7 @@ void decoder::drain_capture()
 			// Iris can return a concealed picture for an intentionally incomplete
 			// access unit. Keep it so intact slices still update the display.
 			const bool concealed = it != pending_frames.end() && it->feedback.stream_corrupted && planes[0].bytesused;
-			video_diagnostics::get().record({.kind = "decoder_capture_error", .detail = concealed ? "concealed" : "discarded", .frame = it != pending_frames.end() ? it->feedback.frame_index : 0, .stream = it != pending_frames.end() ? it->feedback.stream_index : 0u});
+			video_diagnostics::get().record({.kind = "decoder_capture_error", .detail = fmt::format("{} timestamp={} known={} bytes_used={} pending={}", concealed ? "concealed" : "discarded", timestamp, it != pending_frames.end(), planes[0].bytesused, pending_frames.size()), .frame = it != pending_frames.end() ? it->feedback.frame_index : 0, .stream = it != pending_frames.end() ? it->feedback.stream_index : 0u});
 			if (!concealed)
 			{
 				if (it != pending_frames.end())

@@ -41,12 +41,20 @@ min(predicted_display_time - decode_reserve - 2 ms,
 The decode reserve starts at 4 ms and follows measured decoder turnaround
 (including queue time): 125% of the latest 1–16 ms clamped sample, with a 1%
 decay per decoded frame. The UDP receive budget starts at 4 ms (or the ceiling
-below, if smaller). After eight complete UDP samples it becomes 1.3 times the
+below, if smaller). After eight complete UDP samples it becomes 1.5 times the
 mean of the fastest 75% of the last 32 complete UDP assembly durations, with a
-1 ms floor. The ceiling is one described video frame period clamped to 2–20 ms
+2 ms floor. The ceiling is one described video frame period clamped to 2–20 ms
 (90 fps fallback for an invalid rate). Slow successful outliers, truncated
 frames, decoder turnaround and TCP recovery do not train the normal budget.
-After eight consecutive incomplete UDP frames, expand the budget by 50% to at
+For the last 64 retired frame IDs, late UDP source packets from an adaptive
+expiry contribute a separate tail allowance: elapsed time since that frame's
+first packet plus 0.5 ms, bounded to 2–4 ms and the frame-period ceiling. A
+late duplicate of a complete frame, a reliable frame, or a display-deadline
+retirement does not train this allowance. Late symbols stay discarded; this
+only adjusts following frames. The tail allowance decays by 1/128 per complete
+UDP frame, so a single fast frame cannot immediately erase the observed jitter.
+The effective budget is the larger of the fast-sample budget and this allowance.
+After eight consecutive incomplete UDP frames, expand the fast budget by 50% to at
 least 4 ms, within the ceiling, and restart learning. This avoids permanently
 censoring slower samples after a sustained network change. Without view metadata,
 the first-packet limit still applies. If the predicted cutoff was already past
@@ -177,6 +185,49 @@ ctest --test-dir BUILD_DIR/common -R 'video-' --output-on-failure
 ctest --test-dir BUILD_DIR/client -R 'shard-accumulator|video-diagnostics' --output-on-failure
 ```
 
+## Recorded limit adjustment (2026-11-22)
+
+Input: `../log/wivrn-client-log/video-1795278441597786802-77831-0.jsonl`,
+client commit `ac4c3504`, approximately 108 seconds, with zero recorder queue
+losses. The descriptions advertise 90 fps, 768x768 and HEVC. Reconnect creates
+a second stream scene, so analysis keys frame IDs by scene lifetime and stream.
+
+| Stream | Complete UDP frames | Incomplete UDP frames | Incomplete share |
+| --- | ---: | ---: | ---: |
+| 0 | 7,212 | 1,985 | 21.6% |
+| 1 | 7,409 | 1,790 | 19.5% |
+| 2 | 2,415 | 22 | 0.9% |
+
+Across streams 0 and 1, 3,775 of 18,396 UDP frames (20.5%) were incomplete.
+Every incomplete UDP retirement used the adaptive cap, rather than an earlier
+predicted display cutoff. The cap was almost always at the old 1 ms floor.
+Of 3,797 incomplete UDP frames across all streams, 3,655 had packets observed
+after retirement. Their last observed late packet arrived at a median of
+1.301 ms after the first packet, 95th percentile 3.341 ms and 99th percentile
+5.079 ms. This is evidence of a too-short cap; the complete-frame population
+alone is biased toward arrivals that survived that cap. The old backoff also
+required eight consecutive failures and missed frequent isolated failures.
+Two UDP retirements also waited 30.128 ms and 35.362 ms despite 4 ms and 1 ms
+caps respectively. These are late deadline-service events, not configured wait
+budgets; changing the cap alone cannot eliminate such scheduling stalls.
+
+There were 3,126 partial submissions but only 93 corresponding decoded outputs,
+compared with 17,036 complete UDP submissions and 17,036 matching outputs.
+The recording also contains 3,033 discarded Iris CAPTURE error events with no
+matched frame timestamp. These counts indicate that partial submission often
+did not produce displayable output on this device, but do not establish the
+kernel's error cause. The added raw timestamp/bytes-used/pending-count details
+are needed before changing the driver's output acceptance policy.
+
+The adjustment raises the normal floor to 2 ms and the fast-sample multiplier
+to 1.5, and uses observed late arrivals to preserve a slowly decaying tail
+allowance capped at 4 ms. Complete frames still leave immediately. Existing
+absolute display deadlines and the reliable recovery cap are retained. Actual
+post-change latency and loss improvement require another headset recording.
+The log does not contain original packet indices or unit descriptors for every
+late packet; it cannot prove exactly how many frames a different timeout would
+have recovered, nor distinguish every late duplicate from a missing symbol.
+
 ## Client diagnostic recordings
 
 Use **Record diagnostics** on the server list, the connected application picker,
@@ -201,6 +252,8 @@ using `stream_created`/`stream_destroyed` and `mono_ns`, not frame ID alone.
 Events include descriptions, decoder creation, first packets, retirement,
 submission return, decoded output, display/repeated display, network heartbeat,
 application launch requests, errors and Iris source-change/CAPTURE readiness.
+Iris capture-error details include the raw timestamp, whether it matches a
+pending frame, bytes used and pending-frame count.
 Heartbeat `state` values are 0 initializing, 1 streaming, 2 stalled, 3 shutdown;
 `xr_session_state` events carry the OpenXR session state value in `detail`.
 Heartbeat `received` is cumulative
