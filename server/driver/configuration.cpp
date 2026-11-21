@@ -201,6 +201,8 @@ configuration::configuration()
 
 		if (auto it = json.find("use-steamvr-lh"); it != json.end())
 			use_steamvr_lh = *it;
+		if (auto it = json.find("lh-average-relationships"); it != json.end() && it->is_boolean())
+			lh_average_relationships = *it;
 
 		if (auto it = json.find("lighthouse-reference-serial"); it != json.end() && it->is_string())
 		{
