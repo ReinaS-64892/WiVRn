@@ -75,8 +75,12 @@ private:
 					else if (std::abs(closest->timestamp - stored.timestamp) > std::abs(i.timestamp - stored.timestamp))
 						closest = &i;
 				}
-				if (closest and closest->y->dot(*stored.y) < 0)
-					*stored.y *= -1;
+					if (closest and closest->y->dot(*stored.y) < 0)
+					{
+						*stored.y *= -1;
+						if (stored.dy)
+							*stored.dy *= -1;
+					}
 			}
 		}
 	}
