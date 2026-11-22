@@ -21,13 +21,15 @@
 #include "driver/wivrn_session.h"
 
 #include "video_encoder.h"
-#include "video_fec.h"
+#include "video_fec_interleave.h"
 
 #include "encoder_settings.h"
 #include "os/os_time.h"
+#include "util/u_logging.h"
 #include "utils/wivrn_trace.h"
 #include "wivrn_config.h"
 
+#include <charconv>
 #include <string>
 #include <string_view>
 
@@ -167,6 +169,16 @@ std::unique_ptr<video_encoder> video_encoder::create(
 
 	if (auto value = std::getenv("WIVRN_VIDEO_FEC"))
 		res->video_fec = std::string_view(value) != "0";
+	if (auto value = std::getenv("WIVRN_VIDEO_FEC_INTERLEAVE"))
+	{
+		const std::string_view text(value);
+		unsigned depth = 0;
+		const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), depth);
+		if (error == std::errc{} && end == text.data() + text.size() && depth >= 1 && depth <= video_fec_interleave_depth)
+			res->video_fec_interleave = depth;
+		else
+			U_LOG_W("Invalid WIVRN_VIDEO_FEC_INTERLEAVE '%s'; using %zu", value, video_fec_interleave_depth);
+	}
 	auto wivrn_dump_video = std::getenv("WIVRN_DUMP_VIDEO");
 	if (wivrn_dump_video)
 	{
@@ -323,7 +335,33 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 
 	const bool udp = cnx->has_stream() && !control;
 	const bool protect = udp && video_fec;
-	video_fec_encoder fec;
+	std::vector<to_headset::video_stream_data_shard> window;
+	const size_t window_size = video_fec_interleave * video_fec_group_size;
+	if (protect)
+		window.reserve(window_size);
+	auto send_source = [&](const auto & source) {
+		try
+		{
+			if (control)
+				cnx->send_control(to_headset::video_stream_data_shard{source});
+			else
+				cnx->send_stream(to_headset::video_stream_data_shard{source});
+		}
+		catch (...)
+		{
+			// Ignore network errors, as for the original source path.
+		}
+	};
+	auto send_repair = [&](auto repair) {
+		try
+		{
+			cnx->send_stream(std::move(repair));
+		}
+		catch (...)
+		{
+			// Repairs use the same best-effort transport.
+		}
+	};
 	auto begin = data.begin();
 	auto end = data.end();
 	while (begin != end)
@@ -351,32 +389,18 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			}
 		}
 		shard.payload = {begin, next};
-		// The stream cipher mutates source payloads in place, so capture parity first.
-		auto repair = protect ? fec.push(shard, next == end) : std::nullopt;
-		try
-		{
-			if (control)
-				cnx->send_control(to_headset::video_stream_data_shard{shard});
-			else
-				cnx->send_stream(to_headset::video_stream_data_shard{shard});
-		}
-		catch (...)
-		{
-			// Ignore network errors
-		}
-		if (repair)
-		{
-			try
-			{
-				cnx->send_stream(std::move(*repair));
-			}
-			catch (...)
-			{ /* Best-effort repair, like source datagrams. */
-			}
-		}
+		if (protect)
+			window.push_back(shard);
+		else
+			send_source(shard);
 		++shard.shard_idx;
 		shard.view_info.reset();
 		begin = next;
+		if (protect && (window.size() == window_size || begin == end))
+		{
+			send_interleaved_video(window, send_source, send_repair);
+			window.clear();
+		}
 	}
 	if (end_of_frame)
 		wivrn::trace::cpu_end(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");

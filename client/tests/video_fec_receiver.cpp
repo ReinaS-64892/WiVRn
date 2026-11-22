@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "decoder/shard_accumulator.h"
 #include "scenes/stream.h"
-#include "video_fec.h"
+#include "video_fec_interleave.h"
 #include "xr/instance.h"
 
 #include <iostream>
@@ -48,7 +48,7 @@ void require(bool condition, std::source_location where = std::source_location::
 wivrn::to_headset::video_stream_data_shard source(uint64_t frame, uint16_t index, uint16_t count = 6)
 {
 	static auto data = [] {
-		std::array<uint8_t, 24> bytes{};
+		std::array<uint8_t, 64> bytes{};
 		for (size_t i = 0; i < bytes.size(); ++i)
 			bytes[i] = i;
 		return bytes;
@@ -146,6 +146,36 @@ int main()
 			expected[i] = i;
 		require(recording->completed.size() == 1 && recording->completed[0] == expected);
 	}
+	// A real receiver must recover each 1..4-packet burst at every position of
+	// two consecutive full windows, including the boundary and parity packets.
+	std::vector<wivrn::to_headset::packets> interleaved;
+	for (uint16_t first: {0, 32})
+	{
+		std::vector<wivrn::to_headset::video_stream_data_shard> originals;
+		for (uint16_t i = first; i < first + 32; ++i)
+			originals.push_back(source(300, i, 64));
+		wivrn::send_interleaved_video(originals, [&](const auto & s) { interleaved.emplace_back(s); }, [&](auto repair) { interleaved.emplace_back(std::move(repair)); });
+	}
+	require(interleaved.size() == 72);
+	for (size_t burst = 1; burst <= 4; ++burst)
+		for (size_t start = 0; start + burst <= interleaved.size(); ++start)
+		{
+			recording = std::make_shared<recording_decoder>();
+			wivrn::shard_accumulator burst_receiver(device, physical, instance, 0, description, {}, 0);
+			for (size_t i = 0; i < interleaved.size(); ++i)
+			{
+				if (i >= start && i < start + burst)
+					continue;
+				if (auto s = std::get_if<wivrn::to_headset::video_stream_data_shard>(&interleaved[i]))
+					burst_receiver.push_shard(wivrn::to_headset::video_stream_data_shard(*s));
+				else
+					burst_receiver.push_repair(wivrn::to_headset::video_stream_repair_shard(std::get<wivrn::to_headset::video_stream_repair_shard>(interleaved[i])));
+			}
+			std::vector<uint8_t> expected(64);
+			for (size_t i = 0; i < expected.size(); ++i)
+				expected[i] = i;
+			require(recording->completed.size() == 1 && recording->completed[0] == expected);
+		}
 	// Both frame slots can wait for independent repairs; completing the next
 	// frame retains the original policy of retiring an incomplete predecessor.
 	recording = std::make_shared<recording_decoder>();

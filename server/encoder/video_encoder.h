@@ -106,6 +106,7 @@ private:
 	clock_offset clock;
 
 	bool video_fec = true;
+	uint8_t video_fec_interleave = 4;
 	std::ofstream video_dump;
 
 	std::shared_ptr<sender> shared_sender;

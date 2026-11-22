@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include "video_fec.h"
 #include "crypto.h"
+#include "video_fec_interleave.h"
 
 #include <iostream>
 #include <source_location>
@@ -181,5 +181,139 @@ int main()
 	received[7].reset();
 	restored = recover_video_packet(*protected_group, received);
 	require(restored && restored->timing_info && restored->timing_info->send_end == 8901);
+	// Every burst position, including parity loss and uneven short windows.
+	// Wire packets alternate group membership even when one group is shorter.
+	size_t bursts_checked = 0;
+	for (size_t count = 1; count <= video_fec_interleave_window; ++count)
+	{
+		std::vector<std::vector<uint8_t>> payloads(count);
+		std::vector<source_type> originals;
+		for (size_t i = 0; i < count; ++i)
+		{
+			payloads[i].resize(20 + (i * 29) % 700, uint8_t(i));
+			source_type s{};
+			s.frame_idx = 500;
+			s.shard_idx = i;
+			s.payload = payloads[i];
+			if (!i)
+			{
+				s.view_info.emplace();
+				s.view_info->display_time = 2468;
+			}
+			if (i + 1 == count)
+				s.timing_info.emplace();
+			originals.push_back(s);
+		}
+		std::vector<to_headset::packets> wire;
+		send_interleaved_video(originals, [&](const auto & s) { wire.emplace_back(wire_roundtrip(s)); }, [&](auto repair) { wire.emplace_back(wire_roundtrip(std::move(repair))); });
+		const auto groups = (count + 7) / 8;
+		require(wire.size() == count + groups);
+		for (size_t burst = 1; burst <= groups; ++burst)
+			for (size_t start = 0; start + burst <= wire.size(); ++start)
+			{
+				std::vector<std::optional<source_type>> available(count);
+				std::vector<repair_type> surviving;
+				for (size_t i = 0; i < wire.size(); ++i)
+				{
+					if (i >= start && i < start + burst)
+						continue;
+					if (auto s = std::get_if<source_type>(&wire[i]))
+						available[s->shard_idx] = *s;
+					else
+						surviving.push_back(std::get<repair_type>(wire[i]));
+				}
+				for (const auto & repair: surviving)
+					if (auto restored = recover_video_packet(repair, available))
+						available[restored->shard_idx] = std::move(*restored);
+				for (size_t i = 0; i < count; ++i)
+					require(available[i] && video_fec_source_bytes(*available[i]) == video_fec_source_bytes(originals[i]));
+				++bursts_checked;
+			}
+	}
+	// The actual sending callbacks encrypt sources in-place. Computing ALL group
+	// parity before sending must keep recoveries valid even after this mutation.
+	{
+		std::vector<std::vector<uint8_t>> payloads(32, std::vector<uint8_t>(512, 42));
+		std::vector<source_type> originals;
+		for (uint16_t i = 0; i < 32; ++i)
+		{
+			source_type s{};
+			s.frame_idx = 501;
+			s.shard_idx = i;
+			s.payload = payloads[i];
+			if (!i)
+			{
+				s.view_info.emplace();
+				s.view_info->display_time = 6789;
+			}
+			if (i == 31)
+				s.timing_info.emplace();
+			originals.push_back(s);
+		}
+		std::vector<std::optional<source_type>> available(32);
+		std::vector<repair_type> surviving;
+		size_t sent = 0;
+		auto send_source = [&](const auto & s) {
+			auto decoded = wire_roundtrip(s, true);
+			if (sent++ >= 4)
+				available[decoded.shard_idx] = std::move(decoded);
+		};
+		auto send_repair = [&](auto repair) {
+			++sent;
+			surviving.push_back(wire_roundtrip(std::move(repair), true));
+		};
+		send_interleaved_video(originals, send_source, send_repair);
+		require(sent == 36);
+		for (auto & repair: surviving)
+			if (auto restored = recover_video_packet(repair, available))
+				available[restored->shard_idx] = std::move(*restored);
+		for (const auto & s: available)
+			require(s && std::ranges::all_of(s->payload, [](uint8_t b) { return b == 42; }));
+		require(available.front()->view_info && available.back()->timing_info);
+	}
+	// Reject a cross-frame/stream/nonconsecutive or oversized window before any
+	// callback can emit a partial invalid schedule.
+	{
+		size_t sends = 0;
+		auto emit = [&](const auto &) { ++sends; };
+		std::vector<source_type> bad(33);
+		bool rejected = false;
+		try
+		{
+			send_interleaved_video(bad, emit, emit);
+		}
+		catch (const std::runtime_error &)
+		{
+			rejected = true;
+		}
+		require(rejected && !sends);
+		for (int mode = 0; mode < 3; ++mode)
+		{
+			bad.resize(2);
+			bad[0] = {};
+			bad[1] = {};
+			bad[1].shard_idx = 1;
+			if (mode == 0)
+				bad[1].frame_idx = 1;
+			if (mode == 1)
+				bad[1].stream_item_idx = 1;
+			if (mode == 2)
+				bad[1].shard_idx = 2;
+			rejected = false;
+			try
+			{
+				send_interleaved_video(bad, emit, emit);
+			}
+			catch (const std::runtime_error &)
+			{
+				rejected = true;
+			}
+			require(rejected && !sends);
+		}
+		bad.clear();
+		send_interleaved_video(bad, emit, emit);
+		require(!sends);
+	}
+	std::cout << bursts_checked << " interleaved burst-loss schedules passed\n";
 	std::cout << recovered_count << " packet recoveries, metadata, malformed groups, encryption and 1400-byte wire limits passed\n";
 }
