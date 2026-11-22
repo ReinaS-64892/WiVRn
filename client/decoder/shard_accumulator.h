@@ -21,7 +21,9 @@
 
 #include "decoder.h"
 #include "receive_time_budget.h"
+#include "video_fec.h"
 #include "wivrn_packets.h"
+#include <map>
 
 #include <array>
 #include <atomic>
@@ -54,6 +56,9 @@ public:
 	struct shard_set
 	{
 		std::vector<std::optional<data_shard>> data;
+		std::map<uint16_t, to_headset::video_stream_repair_shard> repairs;
+		uint64_t fec_recovered = 0;
+		std::optional<uint16_t> recover(uint16_t group, XrTime now);
 		std::optional<XrTime> deadline;
 		bool reliable = false;
 		XrTime assembled_at = 0;
@@ -63,7 +68,7 @@ public:
 		void reset(uint64_t frame_index);
 		bool empty() const;
 
-		std::optional<uint16_t> insert(data_shard &&, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable, XrDuration hard_wait = 0);
+		std::optional<uint16_t> insert(data_shard &&, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable, XrDuration hard_wait = 0, uint8_t repair_count = 0);
 
 		wivrn::from_headset::feedback feedback{};
 
@@ -82,6 +87,7 @@ public:
 	// Receiver decisions, including frames that never produce a decoded image.
 	struct statistics
 	{
+		uint64_t fec_packets = 0, fec_recovered = 0, fec_frames = 0;
 		uint64_t complete = 0;
 		uint64_t incomplete = 0;
 		uint64_t partial = 0;
@@ -149,6 +155,7 @@ public:
 	}
 
 	void push_shard(wivrn::to_headset::video_stream_data_shard &&, bool reliable = false);
+	void push_repair(to_headset::video_stream_repair_shard &&);
 	XrDuration current_receive_budget() const
 	{
 		return published_receive_budget.load(std::memory_order_relaxed);
@@ -172,6 +179,7 @@ public:
 	using blit_handle = decoder::blit_handle;
 
 private:
+	void push_symbol(data_shard &&, bool reliable, uint8_t repair_count);
 	void try_submit_frame();
 	void send_feedback(wivrn::from_headset::feedback & feedback);
 	void advance();

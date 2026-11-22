@@ -1,6 +1,6 @@
 # Slice loss resilience and FEC extension
 
-This branch changes the video wire protocol (revision 2 and a new automatic
+This branch changes the video wire protocol (revision 3 and a new automatic
 type hash). Install matching server and client builds. Older peers must fail
 the existing protocol compatibility check rather than interpret these packets.
 
@@ -25,8 +25,8 @@ Every packet repeats view metadata and a unit descriptor. Losing the first
 packet no longer loses the poses needed to display the frame. Timing remains
 on the last packet. The maximum serialized video packet, including its variant
 tag and optional metadata, is 1400 bytes before transport encryption. With the
-current layout the conservative source symbol capacity is 1234 bytes, verified
-by the video-wire test. Repeating view metadata costs bandwidth but avoids a separate
+current layout the conservative source symbol capacity is 1233 bytes (one byte reserved for repair source_count), verified
+by the video-fec wire test. Repeating view metadata costs bandwidth but avoids a separate
 reliable per-frame metadata dependency.
 
 The receiver buffers two frames. Complete access units are submitted immediately
@@ -127,7 +127,7 @@ requests a clean IDR for damaged reference frames; Vulkan reference management
 does not acknowledge partial frames as clean references. Concealment can still
 propagate errors through inter-frame prediction until recovery.
 
-## Wire layout and planned parity
+## Wire layout and XOR parity
 
 Existing `stream_item_idx`, `frame_idx`, and frame-wide `shard_idx` are retained.
 Every source packet now includes this descriptor:
@@ -146,30 +146,78 @@ again before assembly. The final symbol length is derived from byte_count;
 conflicting descriptors or incomplete units cannot be concatenated into the
 decoder input.
 
-**Parity generation and recovery are not implemented in this branch.** The next
-step can introduce a separate parity packet variant keyed by
-`(stream_item_idx, frame_idx, unit_idx)` without changing source shard numbering.
-That packet should repeat the source descriptor, codec configuration/view
-metadata as necessary, a FEC scheme/version, and a repair-symbol index. Keep
-repair indices separate from frame-wide source shard indices, and do not count
-parity packets when deciding whether a frame is complete.
+UDP video now uses systematic XOR FEC by default. Each unit is split into
+canonical groups of up to eight consecutive source symbols. The sender emits
+one repair immediately after each group, including a shorter unit tail group.
+It never joins different units or frames, waits for another frame, or adds FEC
+to the existing TCP/control path. All encoder backends use the shared sender;
+this applies to opaque AV1/raw data as well as H.264/HEVC. Codec-independent
+recovery happens before the hardware/software decoder. Slice count remains four
+where supported; no new AV1/HEVC tile layout is introduced in this step.
 
-For a first XOR scheme, zero-pad all symbols to symbol_size and transmit one
-XOR repair symbol per unit. Recover exactly one missing source symbol, trim its
-tail using byte_count, validate its descriptor, then insert it into the same
-source-shard slot before complete-NAL selection. A single parity symbol cannot
-repair two erasures in one unit. Large NALs should be split into bounded FEC
-groups with an explicit group identifier/source range; this bounds parity
-overhead, recovery work and buffering. More general erasure coding can use the
-same source/repair distinction. Repair packets must fit the wire budget; split
-repair data or reduce the source symbol capacity to accommodate their header.
+The new `video_stream_repair_shard` variant carries `source_count` (u8) followed
+by a source-shaped descriptor. Its `shard_idx` is the first protected source
+index, **not** a repair index in the source sequence. The descriptor repeats
+stream/frame/unit information, view metadata, and final-frame timing when the
+protected group contains the frame's last source symbol. Its payload is the XOR
+of all group payloads, each zero-padded to symbol_size. The 1400-byte serialized
+limit applies to repairs too. Revision 3 and the automatic type hash require
+matching server/client builds even when FEC is disabled.
 
-Recovery must happen before the absolute receiver deadline and within the
-two-frame buffering window, without
-waiting for parity or retransmission before retiring a stale frame. Preserve
-duplicate/late-packet handling, reject mismatched group metadata, cap recovery
-work, and add separate feedback for recovered and unrecoverable source symbols.
-Only a fully recovered original access unit should clear stream_corrupted.
+Recovery validates the canonical group alignment/count/range and exact parity
+length, then requires exactly one absent source. Every received operand must
+match frame, stream, unit, source index and exact length. The recovered symbol
+owns its bytes, inherits the repeated view metadata, and is truncated using
+byte_count if it is the unit tail. Final-frame timing is attached only when
+recovering that tail. Recovered sources enter the ordinary complete-NAL path;
+parity occupies separate per-frame storage and never substitutes for a source
+in the completeness test. Duplicate repairs cannot repeat submission. A lost
+repair alone does not delay a complete frame; two missing sources in the same
+group remain unrecoverable. Groups in the same frame recover independently.
+The two-frame window and existing deadlines/grace are unchanged. A retired
+frame is never reopened, and late repairs never train the receive budget.
+Only a fully assembled original access unit clears stream_corrupted.
+
+Set `WIVRN_VIDEO_FEC=0` **in the server process environment** to disable repair
+transmission for an A/B comparison; the default is enabled. This initial scheme
+adds one symbol per eight full-sized sources (approximately 12.5% payload
+redundancy); short tail groups and repeated headers increase the ratio. Encoder
+bitrate is unchanged, so total network traffic increases. This is fixed FEC,
+not congestion-adaptive coding. Burst losses within a group may still defeat it;
+interleaving or a separate multi-repair coding variant can build on the source/
+repair namespace without treating parity bytes as video.
+
+The Video FEC graph shows received repair packets (including redundant/late
+ones), recovered source packets, and fully assembled frames containing at least
+one recovered source. When parity arrives before an original source due to reordering, that source
+may be reconstructed before the original arrives; a recovery is not proof the
+original packet was permanently lost. Recovery/frame counters are collected at retirement,
+independent of decoder output. They do not mean the frame was displayed. Logs
+emit `fec_recovered` per recovered source (`received` is its source index),
+`fec_frame` at retirement (`received` is recovered source count; `complete`
+distinguishes complete/partial recovery), and `late_repair` for retired-frame
+repairs. A normal lossless frame can produce late_repair when its final repair
+arrives after all its sources; this is not evidence of video loss. Repair
+descriptors also contribute to known damaged-VCL and expected_min counts when
+all original source packets in that unit are absent. Count FEC successes and
+remaining incomplete frames together when comparing runs.
+
+The software tests cover each absent position, short/padded tails, multiple
+independent groups, two losses in one group, missing parity, duplicated and
+reordered repair/source arrival, metadata mismatches, final-frame metadata,
+wire round trips and the 1400-byte limit. A real x264/FFmpeg run drops one source
+in every group across 120 four-slice frames, restores byte-identical access
+units, and decodes all 120 frames with matching PTS.
+
+### Latest pre-FEC Steam Frame run
+
+`video-1795363378563497988-107391-0.jsonl` identifies client `12c0c753`.
+Both eyes together retired 22,392 UDP frames, including 1,859 incomplete frames
+(8.30%); 1,306 were submitted as partial inputs. Across all streams, 2,013 grace
+attempts yielded 163 complete assemblies. No backwards display-frame transition
+was observed. This is a different run/workload from earlier logs and does not
+establish a controlled regression or improvement. It supports moving the next
+experiment to packet recovery rather than extending the wait again.
 
 ## Validation and remaining hardware work
 
@@ -424,6 +472,7 @@ bitrate overhead and encoder throughput. Software decoding and compilation do
 not establish hardware quality or latency.
 
 Implementation references:
+[XOR parity principles (RFC 5109; this implementation is not RTP)](https://www.rfc-editor.org/rfc/rfc5109.html),
 [Vulkan H.264 picture info](https://docs.vulkan.org/refpages/latest/refpages/source/VkVideoEncodeH264PictureInfoKHR.html),
 [Vulkan HEVC capabilities](https://docs.vulkan.org/refpages/latest/refpages/source/VkVideoEncodeH265CapabilityFlagBitsKHR.html),
 [NVENC guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/nvenc-video-encoder-api-prog-guide/),

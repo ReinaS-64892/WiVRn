@@ -42,7 +42,7 @@
 namespace wivrn
 {
 
-static constexpr int protocol_revision = 2;
+static constexpr int protocol_revision = 3;
 
 enum class device_id : uint8_t
 {
@@ -899,6 +899,15 @@ public:
 	data_holder data;
 };
 
+// XOR repair namespace is separate from frame-wide source shard indices.
+// source.shard_idx identifies the first protected source; payload is zero-padded
+// parity. Metadata is repeated, including final-frame timing when applicable.
+struct video_stream_repair_shard
+{
+	uint8_t source_count;
+	video_stream_data_shard source;
+};
+
 struct haptics
 {
 	device_id id;
@@ -986,6 +995,7 @@ using packets = std::variant<
         video_stream_description,
         audio_data,
         video_stream_data_shard,
+        video_stream_repair_shard,
         haptics,
         timesync_query,
         tracking_control,

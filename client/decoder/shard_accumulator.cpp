@@ -40,6 +40,8 @@ shard_set::shard_set(uint8_t stream_index)
 void shard_set::reset(uint64_t frame_index)
 {
 	data.clear();
+	repairs.clear();
+	fec_recovered = 0;
 	deadline.reset();
 	reliable = false;
 	assembled_at = 0;
@@ -71,11 +73,11 @@ static bool is_complete(const shard_set & shards)
 	return true;
 }
 
-std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable_transport, XrDuration hard_wait)
+std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable_transport, XrDuration hard_wait, uint8_t repair_count)
 {
 	// A source symbol must belong to the range advertised by its unit.
 	const auto & unit = shard.unit;
-	if (!valid_video_symbol(unit, shard.shard_idx, shard.payload.size()))
+	if (repair_count ? !valid_video_repair(shard, repair_count) : !valid_video_symbol(unit, shard.shard_idx, shard.payload.size()))
 		return {};
 	const bool first = empty();
 	if (first)
@@ -109,18 +111,51 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDur
 		video_diagnostics::get().record({.kind = "frame_first_packet", .xr_ns = now, .frame = shard.frame_idx, .stream = shard.stream_item_idx, .deadline_ns = *deadline, .display_ns = shard.view_info ? shard.view_info->display_time : 0, .budget_ns = reliable ? 100'000'000 : max_wait, .reliable = reliable});
 
 	auto idx = shard.shard_idx;
+	const auto group = uint16_t(unit.first_shard + (idx - unit.first_shard) / video_fec_group_size * video_fec_group_size);
+	if (repair_count)
+	{
+		// Bound storage to one canonical repair per group. Parity never occupies a
+		// source slot and cannot mark a frame complete on its own.
+		repairs.try_emplace(idx, to_headset::video_stream_repair_shard{repair_count, std::move(shard)});
+		if (data.size() <= idx)
+			data.resize(idx + 1);
+		return recover(group, now);
+	}
 	if (idx >= data.size())
 		data.resize(idx + 1);
 	if (data[idx])
 		return {};
 	data[idx] = std::move(shard);
+	recover(group, now);
 	if (is_complete(*this))
 		assembled_at = now;
 	return idx;
 }
 
+std::optional<uint16_t> shard_set::recover(uint16_t group, XrTime now)
+{
+	auto it = repairs.find(group);
+	if (it == repairs.end())
+		return {};
+	auto recovered = recover_video_symbol(it->second, data);
+	if (!recovered)
+		return {};
+	const auto index = recovered->shard_idx;
+	if (data.size() <= index)
+		data.resize(index + 1);
+	data[index] = std::move(*recovered);
+	++fec_recovered;
+	video_diagnostics::get().record({.kind = "fec_recovered", .xr_ns = now, .frame = frame_index(), .stream = feedback.stream_index, .received = index});
+	if (is_complete(*this))
+		assembled_at = now;
+	return index;
+}
+
 shard_accumulator::statistics & shard_accumulator::statistics::operator+=(const statistics & other)
 {
+	fec_packets += other.fec_packets;
+	fec_recovered += other.fec_recovered;
+	fec_frames += other.fec_frames;
 	complete += other.complete;
 	incomplete += other.incomplete;
 	partial += other.partial;
@@ -252,8 +287,24 @@ void shard_accumulator::advance()
 
 void shard_accumulator::push_shard(video_stream_data_shard && shard, bool reliable)
 {
+	push_symbol(std::move(shard), reliable, 0);
+}
+
+void shard_accumulator::push_repair(to_headset::video_stream_repair_shard && repair)
+{
+	if (!valid_video_repair(repair.source, repair.source_count))
+		return;
+	{
+		std::lock_guard lock(statistics_mutex);
+		++pending_statistics.fec_packets;
+	}
+	push_symbol(std::move(repair.source), false, repair.source_count);
+}
+
+void shard_accumulator::push_symbol(video_stream_data_shard && shard, bool reliable, uint8_t repair_count)
+{
 	assert(current.frame_index() + 1 == next.frame_index());
-	if (!valid_video_symbol(shard.unit, shard.shard_idx, shard.payload.size()))
+	if (repair_count ? !valid_video_repair(shard, repair_count) : !valid_video_symbol(shard.unit, shard.shard_idx, shard.payload.size()))
 		return;
 	if (!started)
 	{
@@ -270,24 +321,25 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard, bool reliab
 	if (shard.frame_idx < current.frame_index())
 	{
 		const auto & retired = retired_frames[shard.frame_idx % retired_frames.size()];
-		if (!reliable && retired.adaptive_expiry && retired.frame == shard.frame_idx)
+		if (!repair_count && !reliable && retired.adaptive_expiry && retired.frame == shard.frame_idx)
 		{
 			assembly_budget.late(std::max<XrDuration>(0, now - retired.first_packet), now);
 			published_receive_budget.store(assembly_budget.value(), std::memory_order_relaxed);
 		}
 		// frame is in the past, drop it
 		std::lock_guard lock(statistics_mutex);
-		++pending_statistics.late_packets;
-		video_diagnostics::get().record({.kind = "late_packet", .xr_ns = now, .frame = shard.frame_idx, .stream = shard.stream_item_idx, .received = shard.shard_idx, .reliable = reliable});
+		if (!repair_count)
+			++pending_statistics.late_packets;
+		video_diagnostics::get().record({.kind = repair_count ? "late_repair" : "late_packet", .xr_ns = now, .frame = shard.frame_idx, .stream = shard.stream_item_idx, .received = shard.shard_idx, .reliable = reliable});
 	}
 	else if (frame_diff == 0)
 	{
-		if (current.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable, max_wait))
+		if (current.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable, max_wait, repair_count))
 			try_submit_frame();
 	}
 	else if (frame_diff == 1)
 	{
-		next.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable, max_wait);
+		next.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable, max_wait, repair_count);
 		if (is_complete(next))
 		{
 			finish_current();
@@ -300,7 +352,7 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard, bool reliab
 		finish_current();
 		advance();
 		try_submit_frame();
-		push_shard(std::move(shard), reliable);
+		push_symbol(std::move(shard), reliable, repair_count);
 	}
 	else
 	{
@@ -316,7 +368,7 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard, bool reliab
 		current.reset(shard.frame_idx);
 		next.reset(shard.frame_idx + 1);
 
-		push_shard(std::move(shard), reliable);
+		push_symbol(std::move(shard), reliable, repair_count);
 	}
 	expire(now);
 }
@@ -350,6 +402,14 @@ void shard_accumulator::finish_current(bool expired)
 	}
 	auto payload = complete_video_units(current.data);
 	const bool complete = is_complete(current) && payload.spans.size() == current.data.size();
+	{
+		std::lock_guard lock(statistics_mutex);
+		pending_statistics.fec_recovered += current.fec_recovered;
+		if (current.fec_recovered && complete)
+			++pending_statistics.fec_frames;
+	}
+	if (current.fec_recovered)
+		video_diagnostics::get().record({.kind = "fec_frame", .xr_ns = now, .frame = current.frame_index(), .stream = current.feedback.stream_index, .received = current.fec_recovered, .complete = complete});
 	if (!complete)
 		debug_incomplete_frame(current);
 
@@ -403,6 +463,14 @@ void shard_accumulator::finish_current(bool expired)
 			observed_units[shard->unit.first_shard] = true;
 			observed_vcl += shard->unit.vcl;
 		}
+	// A received repair also proves a unit existed, even if all its original
+	// source packets were lost. Include that known damage in deadline statistics.
+	for (const auto & [first, repair]: current.repairs)
+		if (!observed_units[repair.source.unit.first_shard])
+		{
+			observed_units[repair.source.unit.first_shard] = true;
+			observed_vcl += repair.source.unit.vcl;
+		}
 	const auto damaged_vcl = observed_vcl - payload.vcl_count;
 	if (video_diagnostics::get().active())
 	{
@@ -413,6 +481,8 @@ void shard_accumulator::finish_current(bool expired)
 				++received;
 				expected = std::max<uint64_t>(expected, uint64_t(shard->unit.first_shard) + shard->unit.shard_count);
 			}
+		for (const auto & [first, repair]: current.repairs)
+			expected = std::max<uint64_t>(expected, uint64_t(repair.source.unit.first_shard) + repair.source.unit.shard_count);
 		video_diagnostics::get().record({.kind = "frame", .detail = complete ? "complete" : !view      ? "no_view"
 		                                                                            : !allow_partial   ? "partial_unsupported"
 		                                                                            : !payload.has_vcl ? "no_intact_slice"

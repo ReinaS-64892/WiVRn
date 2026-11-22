@@ -103,7 +103,77 @@ int main()
 	wivrn::to_headset::video_stream_description description{};
 	description.codec.fill(wivrn::h264);
 	recording = std::make_shared<recording_decoder>();
+	// First/final loss, parity arriving first/last, duplication, and two losses.
+	for (int missing = 0; missing < 6; ++missing)
+		for (bool parity_first: {false, true})
+		{
+			recording = std::make_shared<recording_decoder>();
+			wivrn::shard_accumulator fec_receiver(device, physical_device, instance, 0, description, {}, 0);
+			wivrn::video_parity_builder builder;
+			std::vector<wivrn::to_headset::video_stream_repair_shard> repairs;
+			for (int i = 0; i < 6; ++i)
+				if (auto repair = builder.push(packet(100, i)))
+					repairs.push_back(std::move(*repair));
+			if (parity_first)
+				for (auto repair: repairs)
+					fec_receiver.push_repair(std::move(repair));
+			for (int i = 5; i >= 0; --i)
+				if (i != missing)
+					fec_receiver.push_shard(packet(100, i));
+			if (!parity_first)
+				for (auto repair: repairs)
+					fec_receiver.push_repair(std::move(repair));
+			require(recording->frames.size() == 1 && !recording->frames[0].feedback.stream_corrupted);
+			require(recording->frames[0].bytes == std::vector<uint8_t>({0, 1, 2, 3, 4, 5}));
+			for (auto repair: repairs)
+				fec_receiver.push_repair(std::move(repair));
+			fec_receiver.push_shard(packet(100, missing));
+			require(recording->frames.size() == 1);
+			auto stats = fec_receiver.take_statistics();
+			require(stats.fec_recovered == (parity_first ? 2 : 1) && stats.fec_frames == 1 && stats.complete == 1);
+		}
+	{
+		recording = std::make_shared<recording_decoder>();
+		wivrn::shard_accumulator fec_receiver(device, physical_device, instance, 0, description, {}, 0);
+		wivrn::video_parity_builder builder;
+		for (int i = 0; i < 6; ++i)
+		{
+			if (i != 0 && i != 1)
+				fec_receiver.push_shard(packet(101, i));
+			if (auto repair = builder.push(packet(101, i)))
+				fec_receiver.push_repair(std::move(*repair));
+		}
+		require(recording->frames.empty());
+		const auto deadline = *fec_receiver.next_deadline();
+		test_time = deadline;
+		fec_receiver.expire(test_time);
+		require(recording->frames.size() == 1 && recording->frames[0].feedback.stream_corrupted);
+		require(fec_receiver.take_statistics().fec_recovered == 0);
+	}
+
+	// A repair arriving at the original cutoff cannot resurrect a retired frame.
+	{
+		recording = std::make_shared<recording_decoder>();
+		wivrn::shard_accumulator fec_receiver(device, physical_device, instance, 0, description, {}, 0);
+		wivrn::video_parity_builder builder;
+		std::vector<wivrn::to_headset::video_stream_repair_shard> repairs;
+		for (int i = 0; i < 6; ++i)
+		{
+			if (i != 5)
+				fec_receiver.push_shard(packet(102, i));
+			if (auto repair = builder.push(packet(102, i)))
+				repairs.push_back(std::move(*repair));
+		}
+		test_time = *fec_receiver.next_deadline();
+		for (auto repair: repairs)
+			fec_receiver.push_repair(std::move(repair));
+		require(recording->frames.size() == 1 && recording->frames[0].feedback.stream_corrupted);
+		require(fec_receiver.take_statistics().fec_recovered == 0);
+	}
+	test_time = 1'000'000;
+	recording = std::make_shared<recording_decoder>();
 	wivrn::shard_accumulator receiver(device, physical_device, instance, 0, description, {}, 0);
+
 	for (int i: {5, 4, 3, 3, 2, 1, 0})
 		receiver.push_shard(packet(0, i));
 	require(recording->frames.size() == 1 && !recording->frames[0].feedback.stream_corrupted);

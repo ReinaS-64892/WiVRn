@@ -114,6 +114,14 @@ void scenes::stream::operator()(to_headset::video_stream_data_shard && shard, bo
 	decoders[idx].decoder->push_shard(std::move(shard), reliable);
 }
 
+void scenes::stream::operator()(to_headset::video_stream_repair_shard && repair)
+{
+	std::shared_lock lock(decoder_mutex);
+	const auto idx = repair.source.stream_item_idx;
+	if (idx < decoders.size() && decoders[idx].decoder)
+		decoders[idx].decoder->push_repair(std::move(repair));
+}
+
 void scenes::stream::operator()(to_headset::feature_control && control)
 {
 	switch (control.f)

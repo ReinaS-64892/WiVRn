@@ -21,6 +21,7 @@
 #include "driver/wivrn_session.h"
 
 #include "video_encoder.h"
+#include "video_fec.h"
 
 #include "encoder_settings.h"
 #include "os/os_time.h"
@@ -163,6 +164,8 @@ std::unique_ptr<video_encoder> video_encoder::create(
 	if (not res)
 		throw std::runtime_error("Failed to create encoder " + settings.encoder_name);
 
+	if (auto value = std::getenv("WIVRN_VIDEO_FEC"))
+		res->video_fec = std::string_view(value) != "0";
 	auto wivrn_dump_video = std::getenv("WIVRN_DUMP_VIDEO");
 	if (wivrn_dump_video)
 	{
@@ -339,7 +342,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// symbol capacity and exact byte_count also permit future per-unit FEC.
 		shard.payload = {};
 		shard.timing_info = timing_info;
-		const size_t capacity = to_headset::video_stream_data_shard::max_payload_size - serialized_size(shard) - 1;
+		const size_t capacity = to_headset::video_stream_data_shard::max_payload_size - serialized_size(shard) - 2; // Variant tag and repair source_count.
 		shard.timing_info.reset();
 		const size_t count = (bytes.size() + capacity - 1) / capacity;
 		if (unit_index > UINT16_MAX || size_t(shard.shard_idx) + count > UINT16_MAX || bytes.size() > UINT32_MAX)
@@ -352,6 +355,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		        .symbol_size = uint16_t(capacity),
 		        .vcl = vcl,
 		};
+		video_parity_builder parity;
 		while (!bytes.empty())
 		{
 			const size_t size = std::min(bytes.size(), capacity);
@@ -368,6 +372,19 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			catch (...)
 			{
 				// Ignore network errors
+			}
+			if (!control && video_fec)
+			{
+				if (auto repair = parity.push(shard))
+				{
+					try
+					{
+						cnx->send_stream(std::move(*repair));
+					}
+					catch (...)
+					{ /* Same best-effort delivery as source UDP packets. */
+					}
+				}
 			}
 			++shard.shard_idx;
 			bytes = bytes.subspan(size);

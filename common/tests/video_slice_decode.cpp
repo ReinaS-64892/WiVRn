@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#ifndef WIVRN_TEST_FEC
+#define WIVRN_TEST_FEC 0
+#endif
+#if WIVRN_TEST_FEC
+#include "video_fec.h"
+#else
 #include "video_units.h"
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -19,11 +26,15 @@ static void require(bool condition, std::source_location location = std::source_
 		throw std::runtime_error("slice decode regression at line " + std::to_string(location.line()));
 }
 
+#if WIVRN_TEST_FEC
+using shard = wivrn::to_headset::video_stream_data_shard;
+#else
 struct shard
 {
 	wivrn::video_unit_info unit;
 	std::span<uint8_t> payload;
 };
+#endif
 
 int main()
 {
@@ -83,6 +94,10 @@ int main()
 			encoded.insert(encoded.end(), nals[n].p_payload, nals[n].p_payload + nals[n].i_payload);
 
 		std::vector<std::optional<shard>> symbols;
+#if WIVRN_TEST_FEC
+		std::vector<wivrn::to_headset::video_stream_repair_shard> repairs;
+		wivrn::video_parity_builder parity;
+#endif
 		int slices = 0;
 		uint16_t unit_index = 0;
 		for (auto nal: wivrn::annex_b_units(encoded))
@@ -98,22 +113,48 @@ int main()
 			for (unsigned i = 0; i < count; ++i)
 			{
 				const auto payload = nal.subspan(i * 200, std::min<size_t>(200, nal.size() - i * 200));
-				if (frame == 40 && vcl && slices == 2 && i == count / 2)
+#if WIVRN_TEST_FEC
+				shard source{};
+				source.frame_idx = frame;
+				source.shard_idx = symbols.size();
+				source.unit = unit;
+				source.payload = payload;
+				if (auto repair = parity.push(source))
+					repairs.push_back(std::move(*repair));
+				// Lose one source in every group on every frame, including IDRs and tail.
+				const bool drop = i % wivrn::video_fec_group_size == 0;
+#else
+				const bool drop = frame == 40 && vcl && slices == 2 && i == count / 2;
+#endif
+				if (drop)
 				{
 					symbols.emplace_back();
 					symbol_dropped = true;
 				}
 				else
+#if WIVRN_TEST_FEC
+					symbols.emplace_back(source);
+#else
 					symbols.emplace_back(shard{unit, payload});
+#endif
 			}
 		}
+#if WIVRN_TEST_FEC
+		// Reverse repair delivery to exercise independent group indices.
+		for (auto it = repairs.rbegin(); it != repairs.rend(); ++it)
+		{
+			auto recovered = wivrn::recover_video_symbol(*it, symbols);
+			require(bool(recovered));
+			symbols[recovered->shard_idx] = std::move(*recovered);
+		}
+#endif
 		require(slices == 4);
 		auto selected = wivrn::complete_video_units(symbols);
 		require(selected.has_vcl);
 		std::vector<uint8_t> reconstructed;
 		for (auto span: selected.spans)
 			reconstructed.insert(reconstructed.end(), span.begin(), span.end());
-		if (frame != 40)
+		if (WIVRN_TEST_FEC || frame != 40)
 			require(reconstructed == encoded);
 		else
 			require(reconstructed.size() < encoded.size());
@@ -132,5 +173,5 @@ int main()
 	avcodec_free_context(&decoder);
 	x264_picture_clean(&input);
 	x264_encoder_close(encoder);
-	std::cout << "4-slice H.264: one UDP symbol lost, 120/120 frames decoded\n";
+	std::cout << (WIVRN_TEST_FEC ? "4-slice H.264: one loss per FEC group, exact encoded bytes recovered, 120/120 decoded frames\n" : "4-slice H.264: one UDP symbol lost, 120/120 frames decoded\n");
 }

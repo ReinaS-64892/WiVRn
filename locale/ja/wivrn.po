@@ -1519,3 +1519,24 @@ msgstr "猶予中に全体が到着"
 #, c++-format
 msgid "Late-frame grace: {} waits, {} completed frames. Newer complete frames take priority."
 msgstr "遅着猶予の累計：待機 {} 件、全体到着 {} 件。完成済みの後続フレームを優先します。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Video FEC"
+msgstr "映像 FEC"
+
+#: client/scenes/stream_gui.cpp
+msgid "Repair packets"
+msgstr "受信パリティ数"
+
+#: client/scenes/stream_gui.cpp
+msgid "Recovered packets"
+msgstr "復元パケット数"
+
+#: client/scenes/stream_gui.cpp
+msgid "Recovered complete frames"
+msgstr "復元を含む完全フレーム数"
+
+#: client/scenes/stream_gui.cpp
+#, c++-format
+msgid "FEC: {} repair packets, {} recovered packets, {} recovered complete frames."
+msgstr "FEC 累計：受信パリティ {} 個、復元パケット {} 個、復元を含む完全フレーム {} 件。"

@@ -105,6 +105,7 @@ private:
 	to_headset::video_stream_data_shard::timing_info_t timing_info;
 	clock_offset clock;
 	uint32_t unit_index = 0;
+	bool video_fec = true;
 
 	std::ofstream video_dump;
 

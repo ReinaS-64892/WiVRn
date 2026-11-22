@@ -264,6 +264,7 @@ public:
 	void operator()(to_headset::handshake &&) {};
 	void operator()(to_headset::server_message &&);
 	void operator()(to_headset::video_stream_data_shard &&, bool reliable = false);
+	void operator()(to_headset::video_stream_repair_shard &&);
 	void operator()(to_headset::haptics &&);
 	void operator()(to_headset::timesync_query &&);
 	void operator()(to_headset::tracking_control &&);
@@ -344,6 +345,7 @@ private:
 		float partial_unsupported = 0;
 		float deadline_slices_0 = 0, deadline_slices_1 = 0, deadline_slices_2 = 0, deadline_slices_3 = 0, deadline_slices_4_plus = 0;
 		float grace_frames = 0, grace_completed = 0;
+		float fec_packets = 0, fec_recovered = 0, fec_frames = 0;
 	};
 
 	struct plot
