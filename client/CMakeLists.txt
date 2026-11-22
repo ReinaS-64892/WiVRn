@@ -183,6 +183,16 @@ target_compile_definitions(wivrn PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
 
 target_include_directories(wivrn PRIVATE .)
 
+if(WIVRN_BUILD_TEST AND NOT ANDROID)
+    enable_testing()
+    add_executable(wivrn-video-fec-receiver-test tests/video_fec_receiver.cpp decoder/shard_accumulator.cpp)
+    get_target_property(WIVRN_FEC_TEST_LIBRARIES wivrn LINK_LIBRARIES)
+    target_link_libraries(wivrn-video-fec-receiver-test PRIVATE ${WIVRN_FEC_TEST_LIBRARIES})
+    target_include_directories(wivrn-video-fec-receiver-test PRIVATE $<TARGET_PROPERTY:wivrn,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(wivrn-video-fec-receiver-test PRIVATE $<TARGET_PROPERTY:wivrn,COMPILE_DEFINITIONS>)
+    add_test(NAME video-fec-receiver COMMAND wivrn-video-fec-receiver-test)
+endif()
+
 if(NOT ANDROID)
     install(TARGETS wivrn)
 endif()

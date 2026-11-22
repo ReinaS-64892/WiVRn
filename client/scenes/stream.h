@@ -264,6 +264,7 @@ public:
 	void operator()(to_headset::handshake &&) {};
 	void operator()(to_headset::server_message &&);
 	void operator()(to_headset::video_stream_data_shard &&);
+	void operator()(to_headset::video_stream_repair_shard &&);
 	void operator()(to_headset::haptics &&);
 	void operator()(to_headset::timesync_query &&);
 	void operator()(to_headset::tracking_control &&);

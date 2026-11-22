@@ -41,7 +41,7 @@
 namespace wivrn
 {
 
-static constexpr int protocol_revision = 1;
+static constexpr int protocol_revision = 2;
 
 enum class device_id : uint8_t
 {
@@ -895,6 +895,19 @@ public:
 	data_holder data;
 };
 
+// One XOR symbol protecting up to eight consecutive serialized video packets.
+// Source packet layout and metadata placement remain unchanged.
+struct video_stream_repair_shard
+{
+	uint8_t stream_item_idx;
+	uint64_t frame_idx;
+	uint16_t first_shard;
+	uint8_t source_count;
+	std::array<uint16_t, 8> source_sizes{};
+	std::span<uint8_t> payload;
+	data_holder data;
+};
+
 struct haptics
 {
 	device_id id;
@@ -982,6 +995,7 @@ using packets = std::variant<
         video_stream_description,
         audio_data,
         video_stream_data_shard,
+        video_stream_repair_shard,
         haptics,
         timesync_query,
         tracking_control,

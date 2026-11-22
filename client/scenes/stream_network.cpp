@@ -71,12 +71,20 @@ void scenes::stream::operator()(to_headset::video_stream_data_shard && shard)
 {
 	std::shared_lock lock(decoder_mutex);
 	uint8_t idx = shard.stream_item_idx;
-	if (idx >= decoders.size())
+	if (idx >= decoders.size() || !decoders[idx].decoder)
 	{
 		// We don't know (yet?) about this stream, ignore packet
 		return;
 	}
 	decoders[idx].decoder->push_shard(std::move(shard));
+}
+
+void scenes::stream::operator()(to_headset::video_stream_repair_shard && repair)
+{
+	std::shared_lock lock(decoder_mutex);
+	const auto idx = repair.stream_item_idx;
+	if (idx < decoders.size() && decoders[idx].decoder)
+		decoders[idx].decoder->push_repair(std::move(repair));
 }
 
 void scenes::stream::operator()(to_headset::feature_control && control)

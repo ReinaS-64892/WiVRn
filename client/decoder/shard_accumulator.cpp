@@ -20,6 +20,7 @@
 #include "shard_accumulator.h"
 #include "scenes/stream.h" // IWYU pragma: keep
 #include "spdlog/spdlog.h"
+#include "video_fec.h"
 #include "xr/instance.h"
 
 namespace wivrn
@@ -36,7 +37,7 @@ shard_set::shard_set(uint8_t stream_index)
 
 void shard_set::reset(uint64_t frame_index)
 {
-	min_for_reconstruction = -1;
+	repairs.clear();
 	data.clear();
 
 	uint8_t stream_index = feedback.stream_index;
@@ -47,7 +48,7 @@ void shard_set::reset(uint64_t frame_index)
 
 bool shard_set::empty() const
 {
-	return data.empty();
+	return data.empty() && repairs.empty();
 }
 
 static bool is_complete(const shard_set & shards)
@@ -74,7 +75,51 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, xr::instance & in
 	if (data[idx])
 		return {};
 	data[idx] = std::move(shard);
+	auto group = repairs.upper_bound(idx);
+	if (group != repairs.begin())
+	{
+		--group;
+		if (idx < size_t(group->first) + group->second.source_count)
+			if (auto recovered = recover(group->first))
+				return std::min(idx, *recovered);
+	}
 	return idx;
+}
+
+std::optional<uint16_t> shard_set::recover(uint16_t first)
+{
+	auto it = repairs.find(first);
+	if (it == repairs.end())
+		return {};
+	auto recovered = recover_video_packet(it->second, data);
+	if (!recovered)
+		return {};
+	const auto index = recovered->shard_idx;
+	if (data.size() <= index)
+		data.resize(index + 1);
+	data[index] = std::move(*recovered);
+	return index;
+}
+
+std::optional<uint16_t> shard_set::insert(to_headset::video_stream_repair_shard && repair, xr::instance & instance)
+{
+	if (!valid_video_repair(repair) || repair.frame_idx != frame_index() || repair.stream_item_idx != feedback.stream_index)
+		return {};
+	if (empty())
+		feedback.received_first_packet = instance.now();
+	const auto first = repair.first_shard;
+	// Canonical sender groups do not overlap. Reject conflicting ranges.
+	auto next = repairs.lower_bound(first);
+	if (next != repairs.end() && next->first < size_t(first) + repair.source_count)
+		return {};
+	if (next != repairs.begin())
+	{
+		auto previous = std::prev(next);
+		if (size_t(previous->first) + previous->second.source_count > first)
+			return {};
+	}
+	repairs.emplace(first, std::move(repair));
+	return recover(first);
 }
 
 static void debug_why_not_sent(const shard_set & shards)
@@ -109,54 +154,56 @@ void shard_accumulator::advance()
 	next.reset(current.frame_index() + 1);
 }
 
-void shard_accumulator::push_shard(video_stream_data_shard && shard)
+shard_set * shard_accumulator::select_frame(uint64_t frame)
 {
 	assert(current.frame_index() + 1 == next.frame_index());
-
-	auto frame_diff = shard.frame_idx - current.frame_index();
-	if (shard.frame_idx < current.frame_index())
+	if (frame < current.frame_index())
 	{
-		// frame is in the past, drop it
-		spdlog::info("Drop shard for old frame {} (current {})", shard.frame_idx, current.frame_index());
+		spdlog::info("Drop shard for old frame {} (current {})", frame, current.frame_index());
+		return nullptr;
 	}
-	else if (frame_diff == 0)
-	{
-		auto shard_idx = current.insert(std::move(shard), instance);
-		try_submit_frame(shard_idx);
-	}
-	else if (frame_diff == 1)
-	{
-		next.insert(std::move(shard), instance);
-		if (is_complete(next))
-		{
-			debug_why_not_sent(current);
-			send_feedback(current.feedback);
-
-			advance();
-
-			try_submit_frame(0);
-		}
-	}
-	else if (frame_diff == 2)
+	auto difference = frame - current.frame_index();
+	if (difference == 2)
 	{
 		debug_why_not_sent(current);
 		send_feedback(current.feedback);
-
 		advance();
-
-		push_shard(std::move(shard));
 	}
-	else
+	else if (difference > 2)
 	{
-		// We have lost more than one frame
 		send_feedback(current.feedback);
 		send_feedback(next.feedback);
-
-		current.reset(shard.frame_idx);
-		next.reset(shard.frame_idx + 1);
-
-		push_shard(std::move(shard));
+		current.reset(frame);
+		next.reset(frame + 1);
 	}
+	return frame == current.frame_index() ? &current : &next;
+}
+
+void shard_accumulator::inserted(shard_set & target, std::optional<uint16_t> index)
+{
+	if (&target == &current)
+		try_submit_frame(index);
+	else if (is_complete(next))
+	{
+		debug_why_not_sent(current);
+		send_feedback(current.feedback);
+		advance();
+		try_submit_frame(0);
+	}
+}
+
+void shard_accumulator::push_shard(video_stream_data_shard && shard)
+{
+	if (auto target = select_frame(shard.frame_idx))
+		inserted(*target, target->insert(std::move(shard), instance));
+}
+
+void shard_accumulator::push_repair(video_stream_repair_shard && repair)
+{
+	if (!valid_video_repair(repair))
+		return;
+	if (auto target = select_frame(repair.frame_idx))
+		inserted(*target, target->insert(std::move(repair), instance));
 }
 
 void shard_accumulator::try_submit_frame(std::optional<uint16_t> shard_idx)

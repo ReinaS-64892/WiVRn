@@ -105,6 +105,7 @@ private:
 	to_headset::video_stream_data_shard::timing_info_t timing_info;
 	clock_offset clock;
 
+	bool video_fec = true;
 	std::ofstream video_dump;
 
 	std::shared_ptr<sender> shared_sender;

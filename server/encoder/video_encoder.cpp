@@ -21,6 +21,7 @@
 #include "driver/wivrn_session.h"
 
 #include "video_encoder.h"
+#include "video_fec.h"
 
 #include "encoder_settings.h"
 #include "os/os_time.h"
@@ -28,6 +29,7 @@
 #include "wivrn_config.h"
 
 #include <string>
+#include <string_view>
 
 #if WIVRN_USE_NVENC
 #include "video_encoder_nvenc.h"
@@ -163,6 +165,8 @@ std::unique_ptr<video_encoder> video_encoder::create(
 	if (not res)
 		throw std::runtime_error("Failed to create encoder " + settings.encoder_name);
 
+	if (auto value = std::getenv("WIVRN_VIDEO_FEC"))
+		res->video_fec = std::string_view(value) != "0";
 	auto wivrn_dump_video = std::getenv("WIVRN_DUMP_VIDEO");
 	if (wivrn_dump_video)
 	{
@@ -317,11 +321,24 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 
 	ssize_t max_payload_size = (cnx->has_stream() and not control) ? to_headset::video_stream_data_shard::max_payload_size : std::numeric_limits<uint32_t>::max();
 
+	const bool udp = cnx->has_stream() && !control;
+	const bool protect = udp && video_fec;
+	video_fec_encoder fec;
 	auto begin = data.begin();
 	auto end = data.end();
 	while (begin != end)
 	{
-		const size_t payload_size = std::max(0z, max_payload_size - ssize_t(serialized_size(shard.view_info)));
+		size_t payload_size;
+		if (protect)
+		{
+			shard.payload = {};
+			shard.timing_info = timing_info; // Reserve the worst-case final packet.
+			const auto limit = video_fec_symbol_capacity();
+			payload_size = limit - serialized_size(shard);
+			shard.timing_info.reset();
+		}
+		else
+			payload_size = std::max(0z, max_payload_size - ssize_t(serialized_size(shard.view_info)));
 		auto next = std::min(end, begin + payload_size);
 		if (next == end)
 		{
@@ -334,6 +351,8 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			}
 		}
 		shard.payload = {begin, next};
+		// The stream cipher mutates source payloads in place, so capture parity first.
+		auto repair = protect ? fec.push(shard, next == end) : std::nullopt;
 		try
 		{
 			if (control)
@@ -344,6 +363,16 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		catch (...)
 		{
 			// Ignore network errors
+		}
+		if (repair)
+		{
+			try
+			{
+				cnx->send_stream(std::move(*repair));
+			}
+			catch (...)
+			{ /* Best-effort repair, like source datagrams. */
+			}
 		}
 		++shard.shard_idx;
 		shard.view_info.reset();

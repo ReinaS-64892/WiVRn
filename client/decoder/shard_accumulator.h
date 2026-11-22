@@ -22,6 +22,7 @@
 #include "decoder.h"
 #include "wivrn_packets.h"
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -48,12 +49,14 @@ public:
 	using data_shard = wivrn::to_headset::video_stream_data_shard;
 	struct shard_set
 	{
-		size_t min_for_reconstruction = -1;
+		std::map<uint16_t, to_headset::video_stream_repair_shard> repairs;
 		std::vector<std::optional<data_shard>> data;
 		void reset(uint64_t frame_index);
 		bool empty() const;
 
 		std::optional<uint16_t> insert(data_shard &&, xr::instance & instance);
+		std::optional<uint16_t> insert(to_headset::video_stream_repair_shard &&, xr::instance & instance);
+		std::optional<uint16_t> recover(uint16_t first);
 
 		wivrn::from_headset::feedback feedback{};
 
@@ -94,6 +97,7 @@ public:
 	}
 
 	void push_shard(wivrn::to_headset::video_stream_data_shard &&);
+	void push_repair(to_headset::video_stream_repair_shard &&);
 
 	vk::Sampler sampler()
 	{
@@ -107,6 +111,8 @@ public:
 	using blit_handle = decoder::blit_handle;
 
 private:
+	shard_set * select_frame(uint64_t frame);
+	void inserted(shard_set &, std::optional<uint16_t>);
 	void try_submit_frame(std::optional<uint16_t> shard_idx);
 	void try_submit_frame(uint16_t shard_idx);
 	void send_feedback(wivrn::from_headset::feedback & feedback);
