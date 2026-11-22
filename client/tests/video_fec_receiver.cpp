@@ -4,9 +4,12 @@
 #include "video_fec_interleave.h"
 #include "xr/instance.h"
 
+#include <fstream>
 #include <iostream>
+#include <simdjson.h>
 #include <source_location>
 #include <stdexcept>
+#include <unistd.h>
 
 namespace
 {
@@ -88,6 +91,8 @@ void scenes::stream::send_feedback(const wivrn::from_headset::feedback &) {}
 
 int main()
 {
+	auto & recorder = wivrn::video_fec_diagnostics::get();
+	require(recorder.start(std::filesystem::temp_directory_path() / ("wivrn-fec-receiver-" + std::to_string(getpid()))));
 	vk::raii::Device device(nullptr);
 	vk::raii::PhysicalDevice physical(nullptr);
 	xr::instance instance;
@@ -130,8 +135,9 @@ int main()
 		require(recording->completed.size() == 1 && recording->completed[0] == std::vector<uint8_t>({0, 1, 2, 3, 4, 5}));
 		receiver.push_repair(parity(100));
 		require(recording->completed.size() == 1);
+		receiver.push_shard(source(100, 2));
 		auto stats = receiver.take_statistics();
-		require(stats.source_packets == 10 && stats.repair_packets == (with_repair ? 2 : 1));
+		require(stats.source_packets == 11 && stats.repair_packets == (with_repair ? 2 : 1));
 		require(stats.recovered_packets == 0 && stats.completed_frames == 1 && stats.rescued_frames == 0);
 		require(stats.incomplete_frames == 1); // Exclude unobserved startup frame IDs.
 	}
@@ -226,5 +232,91 @@ int main()
 	invalid.source_count = 0;
 	partial.push_repair(std::move(invalid));
 	require(partial.take_statistics().repair_packets == 0);
+	// A syntactically valid repair with inconsistent source length must remain
+	// distinguishable from two losses in a group.
+	recording = std::make_shared<recording_decoder>();
+	wivrn::shard_accumulator mismatch(device, physical, instance, 0, description, {}, 0);
+	for (int i: {0, 1, 3, 4, 5})
+		mismatch.push_shard(source(500, i));
+	auto broken = parity(500);
+	++broken.source_sizes[2];
+	mismatch.push_repair(std::move(broken));
+	for (int i = 0; i < 6; ++i)
+		mismatch.push_shard(source(501, i));
+	// Missing end metadata means the number of absent tail packets is unknown.
+	mismatch.push_shard(source(600, 0));
+	for (int i = 0; i < 6; ++i)
+		mismatch.push_shard(source(601, i));
+	recorder.stop();
+	require(recorder.snapshot().error.empty() && !recorder.snapshot().lost_events);
+	std::ifstream log(recorder.snapshot().path);
+	std::string line;
+	simdjson::dom::parser parser;
+	size_t rescued = 0, incomplete = 0, late_sources = 0, late_repairs = 0;
+	while (std::getline(log, line))
+	{
+		auto json = parser.parse(line);
+		auto kind = json["kind"].get_string().value();
+		if (kind == "frame")
+		{
+			if (json["complete"].get_bool().value())
+				rescued += json["recovered"].get_uint64().value() > 0;
+			else
+			{
+				++incomplete;
+				if (json["frame"].get_uint64().value() == 500)
+				{
+					require(json["missing_min"].get_uint64().value() == 1);
+					require(json["unrecovered_single_groups"].get_uint64().value() == 1);
+					continue;
+				}
+				if (json["frame"].get_uint64().value() == 600)
+				{
+					require(!json["end_known"].get_bool().value());
+					require(json["missing_min"].get_uint64().value() == 0);
+					continue;
+				}
+				require(json["missing_min"].get_uint64().value() == 2);
+				if (json["repair_groups"].get_uint64().value())
+				{
+					require(json["multiple_missing_groups"].get_uint64().value() == 1);
+					require(json["missing_without_repair"].get_uint64().value() == 0);
+				}
+				else
+					require(json["missing_without_repair"].get_uint64().value() == 2);
+			}
+		}
+		else if (kind == "late")
+		{
+			if (json["complete_at_retire"].get_bool().value())
+				continue;
+			if (json["repair"].get_bool().value())
+				++late_repairs;
+			else
+				++late_sources;
+		}
+	}
+	require(rescued > 12 && incomplete == 5 && late_sources == 2 && late_repairs == 2);
+	// Starting in the middle of a frame must flag incomplete capture rather
+	// than presenting its receive counters as a complete observation.
+	mismatch.push_shard(source(700, 0));
+	require(recorder.start(std::filesystem::temp_directory_path() / ("wivrn-fec-receiver-" + std::to_string(getpid()))));
+	for (int i = 1; i < 6; ++i)
+		mismatch.push_shard(source(700, i));
+	recorder.stop();
+	std::ifstream mid_frame(recorder.snapshot().path);
+	bool found_partial_capture = false;
+	while (std::getline(mid_frame, line))
+	{
+		auto json = parser.parse(line);
+		if (json["kind"].get_string().value() == "frame")
+		{
+			require(json["partial_capture"].get_bool().value());
+			require(json["sources_rx"].get_uint64().value() == 5);
+			require(json["present"].get_uint64().value() == 6);
+			found_partial_capture = true;
+		}
+	}
+	require(found_partial_capture);
 	std::cout << "First/middle/final recovery, reordered/duplicate repairs, two-frame buffering and original discard policy passed\n";
 }

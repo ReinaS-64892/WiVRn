@@ -203,7 +203,7 @@ void scenes::stream::gui_performance_metrics(bool fec_only)
 
 	ImVec2 plot_size = ImVec2(
 	        window_size.x / n_cols - style.ItemSpacing.x * (n_cols - 1) / n_cols,
-	        (fec_only ? window_size.y * 0.55f : (window_size.y - 2 * ImGui::GetCurrentContext()->FontSize - 2 * style.ItemSpacing.y) / n_rows) - style.ItemSpacing.y * (n_rows - 1) / n_rows);
+	        (fec_only ? window_size.y * 0.4f : (window_size.y - 2 * ImGui::GetCurrentContext()->FontSize - 2 * style.ItemSpacing.y) / n_rows) - style.ItemSpacing.y * (n_rows - 1) / n_rows);
 
 	ImPlot::PushStyleColor(ImPlotCol_PlotBg, ImVec4{t.background.x, t.background.y, t.background.z, 0.8f});
 	ImPlot::PushStyleColor(ImPlotCol_PlotBorder, t.border);
@@ -372,6 +372,22 @@ void scenes::stream::gui_performance_metrics(bool fec_only)
 		ImGui::TextWrapped("%s", fmt::format(_F("Video packets: {} data / {} repair; FEC recovered: {}"), video_statistics.source_packets, video_statistics.repair_packets, video_statistics.recovered_packets).c_str());
 		ImGui::TextWrapped("%s", fmt::format(_F("Video frames: {} complete / {} rescued by FEC / {} incomplete"), video_statistics.completed_frames, video_statistics.rescued_frames, video_statistics.incomplete_frames).c_str());
 		ImGui::TextWrapped("%s", _S("Frames are counted per eye/stream. FEC-rescued frames are included in complete frames."));
+		auto & recorder = wivrn::video_fec_diagnostics::get();
+		auto status = recorder.snapshot();
+		if (ImGui::Button(status.recording ? _S("Stop FEC recording") : _S("Record FEC diagnostics")))
+		{
+			if (status.recording)
+				recorder.stop();
+			else
+				recorder.start();
+			status = recorder.snapshot();
+		}
+		if (!status.path.empty())
+			ImGui::TextWrapped("%s", fmt::format(_F("Diagnostic log: {}"), status.path.string()).c_str());
+		if (!status.error.empty())
+			ImGui::TextWrapped("%s", fmt::format(_F("Recording error: {}"), status.error).c_str());
+		if (status.lost_events)
+			ImGui::TextWrapped("%s", fmt::format(_F("Recording queue overflow: {} events lost"), status.lost_events).c_str());
 		return;
 	}
 

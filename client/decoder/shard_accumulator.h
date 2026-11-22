@@ -20,8 +20,10 @@
 #pragma once
 
 #include "decoder.h"
+#include "video_fec_diagnostics.h"
 #include "wivrn_packets.h"
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -74,6 +76,14 @@ public:
 	using data_shard = wivrn::to_headset::video_stream_data_shard;
 	struct shard_set
 	{
+		struct diagnostic_timing
+		{
+			uint64_t generation = 0;
+			int64_t first_ns = 0, last_ns = 0, max_gap_ns = 0;
+			uint64_t sources = 0, repairs = 0, duplicate_sources = 0, reordered_sources = 0, payload_bytes = 0;
+			std::optional<uint16_t> previous_source;
+			bool partial_capture = false;
+		} diagnostics;
 		uint64_t recovered_packets = 0;
 		std::map<uint16_t, to_headset::video_stream_repair_shard> repairs;
 		std::vector<std::optional<data_shard>> data;
@@ -99,6 +109,18 @@ public:
 	};
 
 private:
+	const uint64_t diagnostics_id = video_fec_diagnostics::next_receiver_id();
+	struct retired_frame
+	{
+		uint64_t frame, generation;
+		int64_t retired_ns;
+		bool complete;
+	};
+	std::deque<retired_frame> recently_damaged;
+	void observe_packet(shard_set &, bool repair, uint16_t index, size_t bytes);
+	void record_retirement(const shard_set &, bool complete, const char * reason);
+	void record_late(uint64_t frame, bool repair, uint16_t index, uint8_t count);
+
 	std::mutex statistics_mutex;
 	statistics pending_statistics;
 	shard_set current;
@@ -143,7 +165,7 @@ private:
 	void inserted(shard_set &, std::optional<uint16_t>);
 	void try_submit_frame(std::optional<uint16_t> shard_idx);
 	void try_submit_frame(uint16_t shard_idx);
-	void send_feedback(shard_set & shards, bool completed = false);
+	void send_feedback(shard_set & shards, bool completed = false, const char * reason = "window_advanced");
 	void advance();
 };
 } // namespace wivrn

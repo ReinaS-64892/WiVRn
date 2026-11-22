@@ -1400,3 +1400,21 @@ msgstr "映像パケットの復元と不完全なフレーム。"
 
 msgid "Frames are counted per eye/stream. FEC-rescued frames are included in complete frames."
 msgstr "フレームは各眼・ストリーム別に集計します。FEC 救済数は完成数の内数です。"
+
+msgid "Record FEC diagnostics"
+msgstr "FEC 診断ログを記録"
+
+msgid "Stop FEC recording"
+msgstr "FEC 記録を停止"
+
+#, c++-format
+msgid "Diagnostic log: {}"
+msgstr "診断ログ: {}"
+
+#, c++-format
+msgid "Recording error: {}"
+msgstr "記録エラー: {}"
+
+#, c++-format
+msgid "Recording queue overflow: {} events lost"
+msgstr "記録キュー超過: {} 件のイベントを記録できませんでした"
