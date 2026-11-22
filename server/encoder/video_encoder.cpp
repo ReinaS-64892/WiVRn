@@ -21,7 +21,7 @@
 #include "driver/wivrn_session.h"
 
 #include "video_encoder.h"
-#include "video_fec.h"
+#include "video_fec_sender.h"
 
 #include "encoder_settings.h"
 #include "os/os_time.h"
@@ -29,6 +29,7 @@
 #include "wivrn_config.h"
 
 #include <string>
+#include <string_view>
 
 #if WIVRN_USE_NVENC
 #include "video_encoder_nvenc.h"
@@ -339,7 +340,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			}
 		}
 		// Reserve worst-case metadata, even on non-final packets. Fixed source
-		// symbol capacity and exact byte_count also permit future per-unit FEC.
+		// symbol capacity also leaves room for the repair packet header.
 		shard.payload = {};
 		shard.timing_info = timing_info;
 		const size_t capacity = to_headset::video_stream_data_shard::max_payload_size - serialized_size(shard) - 2; // Variant tag and repair source_count.
@@ -362,30 +363,30 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			if (end_of_frame && unit_idx + 1 == units.size() && size == bytes.size())
 				shard.timing_info = timing_info;
 			shard.payload = bytes.first(size);
-			try
-			{
-				if (control)
-					cnx->send_control(to_headset::video_stream_data_shard{shard});
-				else
-					cnx->send_stream(to_headset::video_stream_data_shard{shard});
-			}
-			catch (...)
-			{
-				// Ignore network errors
-			}
-			if (!control && video_fec)
-			{
-				if (auto repair = parity.push(shard))
+			auto send_source = [&](const auto & source) {
+				try
 				{
-					try
-					{
-						cnx->send_stream(std::move(*repair));
-					}
-					catch (...)
-					{ /* Same best-effort delivery as source UDP packets. */
-					}
+					if (control)
+						cnx->send_control(to_headset::video_stream_data_shard{source});
+					else
+						cnx->send_stream(to_headset::video_stream_data_shard{source});
 				}
-			}
+				catch (...)
+				{
+					// Ignore source network errors.
+				}
+			};
+			auto send_repair = [&](auto repair) {
+				try
+				{
+					cnx->send_stream(std::move(repair));
+				}
+				catch (...)
+				{
+					// Same best-effort delivery as source UDP packets.
+				}
+			};
+			send_video_source(shard, !control && video_fec ? &parity : nullptr, send_source, send_repair);
 			++shard.shard_idx;
 			bytes = bytes.subspan(size);
 		}

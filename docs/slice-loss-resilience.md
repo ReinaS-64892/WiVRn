@@ -160,7 +160,9 @@ by a source-shaped descriptor. Its `shard_idx` is the first protected source
 index, **not** a repair index in the source sequence. The descriptor repeats
 stream/frame/unit information, view metadata, and final-frame timing when the
 protected group contains the frame's last source symbol. Its payload is the XOR
-of all group payloads, each zero-padded to symbol_size. The 1400-byte serialized
+of all group payloads, each zero-padded to symbol_size. Parity is accumulated
+from plaintext **before** source send, because UDP encryption mutates payload
+spans in place; both source and repair then use normal transport encryption. The 1400-byte serialized
 limit applies to repairs too. Revision 3 and the automatic type hash require
 matching server/client builds even when FEC is disabled.
 
@@ -205,7 +207,8 @@ remaining incomplete frames together when comparing runs.
 The software tests cover each absent position, short/padded tails, multiple
 independent groups, two losses in one group, missing parity, duplicated and
 reordered repair/source arrival, metadata mismatches, final-frame metadata,
-wire round trips and the 1400-byte limit. A real x264/FFmpeg run drops one source
+wire round trips, AES-CTR transport mutation through the actual sender helper,
+and the 1400-byte limit. A real x264/FFmpeg run drops one source
 in every group across 120 four-slice frames, restores byte-identical access
 units, and decodes all 120 frames with matching PTS.
 

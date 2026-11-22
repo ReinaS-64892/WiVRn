@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include "video_fec.h"
+#include "crypto.h"
 #include "protocol_version.h"
+#include "video_fec_sender.h"
 
 #include <iostream>
 #include <random>
@@ -89,6 +90,76 @@ int main()
 			}
 		}
 	}
+
+	// Exercise the actual sender ordering with the UDP stream cipher. Serialization
+	// references payload spans, so encryption overwrites the encoder's source bytes.
+	{
+		crypto::encrypt_context encrypt(EVP_aes_128_ctr());
+		crypto::decrypt_context decrypt(EVP_aes_128_ctr());
+		std::array<uint8_t, 16> key{}, iv{};
+		uint8_t sequence = 0;
+		auto transfer = [&](auto outgoing) {
+			serialization_packet packet;
+			auto value = to_headset::packets{std::move(outgoing)};
+			packet.serialize(value);
+			auto & spans = static_cast<std::vector<std::span<uint8_t>> &>(packet);
+			iv[0] = ++sequence;
+			encrypt.set_key_and_iv(key, iv);
+			encrypt.encrypt_in_place(spans);
+			size_t size = 0;
+			for (auto span: spans)
+				size += span.size();
+			auto memory = std::shared_ptr<uint8_t[]>(new uint8_t[size]);
+			size_t offset = 0;
+			for (auto span: spans)
+			{
+				std::copy(span.begin(), span.end(), memory.get() + offset);
+				offset += span.size();
+			}
+			decrypt.set_key_and_iv(key, iv);
+			decrypt.decrypt_in_place({memory.get(), size});
+			deserialization_packet input(memory, {memory.get(), size});
+			return input.deserialize<to_headset::packets>();
+		};
+		std::vector<uint8_t> plain(16 * 1233 + 25);
+		for (auto & b: plain)
+			b = rng();
+		auto encoder_bytes = plain;
+		std::vector<std::optional<shard>> received(17);
+		std::vector<to_headset::video_stream_repair_shard> repairs;
+		video_parity_builder builder;
+		for (uint16_t i = 0; i < 17; ++i)
+		{
+			shard s{};
+			s.frame_idx = 987;
+			s.shard_idx = i;
+			s.unit = {0, 0, 17, uint32_t(plain.size()), 1233, true};
+			s.view_info.emplace();
+			s.view_info->display_time = 12345;
+			if (i == 16)
+				s.timing_info.emplace();
+			s.payload = std::span(encoder_bytes).subspan(i * 1233, i == 16 ? 25 : 1233);
+			send_video_source(s, &builder, [&](const auto & source) {
+     auto wire = transfer(source);
+     if (i % video_fec_group_size) received[i] = std::get<shard>(std::move(wire)); }, [&](auto repair) {
+     auto wire = transfer(std::move(repair));
+     repairs.push_back(std::get<to_headset::video_stream_repair_shard>(std::move(wire))); });
+		}
+		require(encoder_bytes != plain); // Confirm actual in-place transport mutation.
+		for (const auto & repair: repairs)
+		{
+			auto recovered = recover_video_symbol(repair, received);
+			require(bool(recovered));
+			received[recovered->shard_idx] = std::move(*recovered);
+		}
+		std::vector<uint8_t> restored;
+		for (const auto & source: received)
+		{
+			require(bool(source));
+			restored.insert(restored.end(), source->payload.begin(), source->payload.end());
+		}
+		require(restored == plain && received.back()->timing_info);
+	}
 	// Worst-case wire metadata is budgeted for both packet types.
 	shard s{};
 	s.view_info.emplace();
@@ -101,7 +172,8 @@ int main()
 	auto repair = builder.push(s);
 	require(bool(repair));
 	serialization_packet output;
-	output.serialize(to_headset::packets{*repair});
+	auto value = to_headset::packets{*repair};
+	output.serialize(value);
 	std::vector<uint8_t> wire;
 	for (auto span: static_cast<std::vector<std::span<uint8_t>> &>(output))
 		wire.insert(wire.end(), span.begin(), span.end());
