@@ -44,14 +44,17 @@
 
 namespace
 {
-float compute_plot_max_value(float * data, int count, ptrdiff_t stride)
+float compute_plot_max_value(const float * data, int count, ptrdiff_t stride)
 {
 	float max = 0;
 	uintptr_t ptr = (uintptr_t)data;
 	for (int i = 0; i < count; i++)
 	{
-		max = std::max(max, *(float *)(ptr + i * stride));
+		max = std::max(max, *(const float *)(ptr + i * stride));
 	}
+
+	if (max == 0)
+		return 0;
 
 	// First power of 10 less than the max
 	float x = pow(10, floor(log10(max)));
@@ -120,6 +123,14 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	global_metrics[metrics_offset].bandwidth_rx = bandwidth_rx * 8;
 	global_metrics[metrics_offset].bandwidth_tx = bandwidth_tx * 8;
 
+	shard_accumulator::statistics interval;
+	for (auto & decoder: decoders)
+		if (decoder.decoder)
+			interval += decoder.decoder->take_statistics();
+	video_statistics += interval;
+	global_metrics[metrics_offset].fec_recovered = interval.recovered_packets;
+	global_metrics[metrics_offset].incomplete_frames = interval.incomplete_frames;
+
 	std::vector<shard_accumulator::blit_handle *> active_handles;
 	active_handles.reserve(blit_handles.size());
 	for (const auto & h: blit_handles)
@@ -165,33 +176,34 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	metrics_offset = (metrics_offset + 1) % global_metrics.size();
 }
 
-void scenes::stream::gui_performance_metrics()
+void scenes::stream::gui_performance_metrics(bool fec_only)
 {
 	const ImGuiStyle & style = ImGui::GetStyle();
 	const wivrn::ui::theme & t = wivrn::ui::current();
 
 	ImVec2 window_size = ImGui::GetWindowSize() - ImVec2(2, 2) * style.WindowPadding;
 
-	const std::array plots = {
-	        // clang-format off
-	        plot(_("CPU time"), {{"",          &global_metric::cpu_time}},     "s"),
-
-	        plot(_("GPU time"), {{_("Defoveate"), &global_metric::gpu_time}},  "s"),
-
-	        plot(_("Network"), {{_("Download"),  &global_metric::bandwidth_rx},
-	                            {_("Upload"),    &global_metric::bandwidth_tx}}, "bit/s"),
-	        // clang-format on
+	const std::array performance_plots = {
+	        plot(_("CPU time"), {{"", &global_metric::cpu_time}}, "s"),
+	        plot(_("GPU time"), {{_("Defoveate"), &global_metric::gpu_time}}, "s"),
+	        plot(_("Network"), {{_("Download"), &global_metric::bandwidth_rx}, {_("Upload"), &global_metric::bandwidth_tx}}, "bit/s"),
 	};
+	const std::array fec_plots = {
+	        plot(_("FEC recovery"), {{_("Recovered packets"), &global_metric::fec_recovered}}, "packets"),
+	        plot(_("Incomplete video frames"), {{_("Incomplete"), &global_metric::incomplete_frames}}, "frames"),
+	};
+	const auto plots = fec_only ? std::span<const plot>(fec_plots) : std::span<const plot>(performance_plots);
 
-	int n_plots = plots.size() + decoder_metrics.size();
-	axis_scale.resize(n_plots);
+	auto & scales = fec_only ? fec_axis_scale : axis_scale;
+	int n_plots = plots.size() + (fec_only ? 0 : decoder_metrics.size());
+	scales.resize(n_plots);
 
 	int n_cols = 2;
 	int n_rows = ceil((float)n_plots / n_cols);
 
 	ImVec2 plot_size = ImVec2(
 	        window_size.x / n_cols - style.ItemSpacing.x * (n_cols - 1) / n_cols,
-	        (window_size.y - 2 * ImGui::GetCurrentContext()->FontSize - 2 * style.ItemSpacing.y) / n_rows - style.ItemSpacing.y * (n_rows - 1) / n_rows);
+	        (fec_only ? window_size.y * 0.55f : (window_size.y - 2 * ImGui::GetCurrentContext()->FontSize - 2 * style.ItemSpacing.y) / n_rows) - style.ItemSpacing.y * (n_rows - 1) / n_rows);
 
 	ImPlot::PushStyleColor(ImPlotCol_PlotBg, ImVec4{t.background.x, t.background.y, t.background.z, 0.8f});
 	ImPlot::PushStyleColor(ImPlotCol_PlotBorder, t.border);
@@ -213,18 +225,24 @@ void scenes::stream::gui_performance_metrics()
 			{
 				max_v = std::max(max_v, compute_plot_max_value(&(global_metrics.data()->*data), global_metrics.size(), sizeof(global_metric)));
 			}
-			auto [multiplier, prefix] = compute_plot_unit(max_v);
+			const bool counter_plot = fec_only;
+			if (counter_plot)
+				max_v = std::max(1.f, max_v);
+			auto [multiplier, prefix] = counter_plot ? std::pair<float, std::string>{1, ""} : compute_plot_unit(max_v);
 
-			if (axis_scale[n] == 0 || std::isnan(axis_scale[n]))
-				axis_scale[n] = max_v;
+			if (scales[n] == 0 || std::isnan(scales[n]))
+				scales[n] = max_v;
 			else
-				axis_scale[n] = 0.99 * axis_scale[n] + 0.01 * max_v;
+				scales[n] = 0.99 * scales[n] + 0.01 * max_v;
+
+			if (counter_plot)
+				scales[n] = std::max(scales[n], max_v);
 
 			auto color = ImPlot::GetColormapColor(n);
 
 			std::string title_with_units = std::string(title) + " [" + prefix + unit + "]";
 			ImPlot::SetupAxes(nullptr, title_with_units.c_str(), ImPlotAxisFlags_NoDecorations, 0);
-			ImPlot::SetupAxesLimits(0, global_metrics.size() - 1, min_v * multiplier, axis_scale[n] * multiplier, ImGuiCond_Always);
+			ImPlot::SetupAxesLimits(0, global_metrics.size() - 1, min_v * multiplier, scales[n] * multiplier, ImGuiCond_Always);
 			ImPlotSpec spec;
 			spec.LineColor = color;
 			spec.FillColor = color;
@@ -241,7 +259,7 @@ void scenes::stream::gui_performance_metrics()
 				ImPlot::PlotLineG(subtitle.c_str(), getter, &gdata, global_metrics.size(), spec);
 
 				double x[] = {double(metrics_offset), double(metrics_offset)};
-				double y[] = {0, axis_scale[n] * multiplier};
+				double y[] = {0, scales[n] * multiplier};
 				spec.LineColor = ImVec4(1, 1, 1, 1);
 				ImPlot::PlotLine("", x, y, 2, spec);
 			}
@@ -252,7 +270,7 @@ void scenes::stream::gui_performance_metrics()
 			ImGui::SameLine();
 	}
 
-	for (auto && [index, metrics]: utils::enumerate(decoder_metrics))
+	for (auto && [index, metrics]: utils::enumerate(std::span(decoder_metrics).first(fec_only ? 0 : decoder_metrics.size())))
 	{
 		std::string title = fmt::format(_F("Decoder {}"), std::to_string(index));
 		if (ImPlot::BeginPlot(title.c_str(), plot_size, ImPlotFlags_NoTitle | ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText))
@@ -261,14 +279,14 @@ void scenes::stream::gui_performance_metrics()
 			float max_v = compute_plot_max_value(&(metrics.data()->displayed), metrics.size(), sizeof(decoder_metric));
 			// auto [ multiplier, prefix ] = compute_plot_unit(max_v);
 
-			if (axis_scale[n] == 0)
-				axis_scale[n] = max_v;
+			if (scales[n] == 0)
+				scales[n] = max_v;
 			else
-				axis_scale[n] = 0.99 * axis_scale[n] + 0.01 * max_v;
+				scales[n] = 0.99 * scales[n] + 0.01 * max_v;
 
 			std::string title_with_units = _("Timings [ms]");
 			ImPlot::SetupAxes(nullptr, title_with_units.c_str(), ImPlotAxisFlags_NoDecorations, 0);
-			ImPlot::SetupAxesLimits(0, metrics.size() - 1, min_v * 1e3f, axis_scale[n] * 1e3f, ImGuiCond_Always);
+			ImPlot::SetupAxesLimits(0, metrics.size() - 1, min_v * 1e3f, scales[n] * 1e3f, ImGuiCond_Always);
 
 			getter_data getter_encode_begin{
 			        .data = (uintptr_t)&(metrics.data()->encode_begin),
@@ -347,6 +365,14 @@ void scenes::stream::gui_performance_metrics()
 	}
 
 	ImPlot::PopStyleColor(8);
+	if (fec_only)
+	{
+		ImGui::TextWrapped("%s", fmt::format(_F("Video packets: {} data / {} repair; FEC recovered: {}"), video_statistics.source_packets, video_statistics.repair_packets, video_statistics.recovered_packets).c_str());
+		ImGui::TextWrapped("%s", fmt::format(_F("Video frames: {} complete / {} rescued by FEC / {} incomplete"), video_statistics.completed_frames, video_statistics.rescued_frames, video_statistics.incomplete_frames).c_str());
+		ImGui::TextWrapped("%s", _S("Frames are counted per eye/stream. FEC-rescued frames are included in complete frames."));
+		return;
+	}
+
 	{
 		ImGui::TextUnformatted(
 		        fmt::format(
@@ -868,9 +894,10 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20, 20});
 			ImGui::BeginChild("Main", ImVec2(ImGui::GetWindowSize().x - ImGui::GetCursorPosX() - content_margin, 0));
 			ImGui::SetCursorPosY(20);
-			wivrn::ui::page_header(_S("Statistics"), _S("Live streaming performance."));
+			wivrn::ui::page_header(show_fec_statistics ? _S("FEC statistics") : _S("Statistics"),
+			                       show_fec_statistics ? _S("Video packet recovery and incomplete frames.") : _S("Live streaming performance."));
 			ImGui::BeginChild("plots", {0, 0});
-			gui_performance_metrics();
+			gui_performance_metrics(show_fec_statistics);
 			ImGui::EndChild();
 			ImGui::EndChild();
 			ImGui::PopStyleVar();
@@ -1012,8 +1039,16 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 				});
 				next_gui_status = stream_tab::application_launcher;
 			}
-			if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _S("Statistics"), gui_status == stream_tab::stats))
+			if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _S("Statistics"), gui_status == stream_tab::stats && !show_fec_statistics))
+			{
+				show_fec_statistics = false;
 				next_gui_status = stream_tab::stats;
+			}
+			if (wivrn::ui::nav_item(ICON_FA_CHART_LINE, _S("FEC statistics"), gui_status == stream_tab::stats && show_fec_statistics))
+			{
+				show_fec_statistics = true;
+				next_gui_status = stream_tab::stats;
+			}
 
 			wivrn::ui::nav_section(_cS("tab group", "SETTINGS"));
 			auto settings_item = [&](const char * icon, const std::string & label, settings_page page) {

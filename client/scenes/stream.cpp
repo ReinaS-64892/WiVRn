@@ -848,6 +848,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	std::shared_lock lock(decoder_mutex);
 	if (not frame_state.shouldRender or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
 	{
+		if (state_ != state::shutdown)
+			accumulate_metrics(frame_state.predictedDisplayTime, {}, {});
 		// TODO: stop/restart video stream
 		session.begin_frame();
 		session.end_frame(frame_state.predictedDisplayTime, {});

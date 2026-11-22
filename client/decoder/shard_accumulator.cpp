@@ -22,6 +22,7 @@
 #include "spdlog/spdlog.h"
 #include "video_fec.h"
 #include "xr/instance.h"
+#include <utility>
 
 namespace wivrn
 {
@@ -37,6 +38,7 @@ shard_set::shard_set(uint8_t stream_index)
 
 void shard_set::reset(uint64_t frame_index)
 {
+	recovered_packets = 0;
 	repairs.clear();
 	data.clear();
 
@@ -98,6 +100,7 @@ std::optional<uint16_t> shard_set::recover(uint16_t first)
 	if (data.size() <= index)
 		data.resize(index + 1);
 	data[index] = std::move(*recovered);
+	++recovered_packets;
 	return index;
 }
 
@@ -166,13 +169,13 @@ shard_set * shard_accumulator::select_frame(uint64_t frame)
 	if (difference == 2)
 	{
 		debug_why_not_sent(current);
-		send_feedback(current.feedback);
+		send_feedback(current);
 		advance();
 	}
 	else if (difference > 2)
 	{
-		send_feedback(current.feedback);
-		send_feedback(next.feedback);
+		send_feedback(current);
+		send_feedback(next);
 		current.reset(frame);
 		next.reset(frame + 1);
 	}
@@ -186,7 +189,7 @@ void shard_accumulator::inserted(shard_set & target, std::optional<uint16_t> ind
 	else if (is_complete(next))
 	{
 		debug_why_not_sent(current);
-		send_feedback(current.feedback);
+		send_feedback(current);
 		advance();
 		try_submit_frame(0);
 	}
@@ -194,6 +197,10 @@ void shard_accumulator::inserted(shard_set & target, std::optional<uint16_t> ind
 
 void shard_accumulator::push_shard(video_stream_data_shard && shard)
 {
+	{
+		std::lock_guard lock(statistics_mutex);
+		++pending_statistics.source_packets;
+	}
 	if (auto target = select_frame(shard.frame_idx))
 		inserted(*target, target->insert(std::move(shard), instance));
 }
@@ -202,6 +209,10 @@ void shard_accumulator::push_repair(video_stream_repair_shard && repair)
 {
 	if (!valid_video_repair(repair))
 		return;
+	{
+		std::lock_guard lock(statistics_mutex);
+		++pending_statistics.repair_packets;
+	}
 	if (auto target = select_frame(repair.frame_idx))
 		inserted(*target, target->insert(std::move(repair), instance));
 }
@@ -255,13 +266,29 @@ void shard_accumulator::try_submit_frame(uint16_t shard_idx)
 	// Try to extract a frame
 	decoder_->frame_completed(current.feedback, *data_shards.front()->view_info);
 
-	send_feedback(current.feedback);
+	send_feedback(current, true);
 
 	advance();
 }
 
-void shard_accumulator::send_feedback(wivrn::from_headset::feedback & feedback)
+shard_accumulator::statistics shard_accumulator::take_statistics()
 {
+	std::lock_guard lock(statistics_mutex);
+	return std::exchange(pending_statistics, {});
+}
+
+void shard_accumulator::send_feedback(shard_set & shards, bool completed)
+{
+	// Empty placeholders and wholly unseen frames have no measurable outcome.
+	if (!shards.empty())
+	{
+		std::lock_guard lock(statistics_mutex);
+		pending_statistics.recovered_packets += shards.recovered_packets;
+		pending_statistics.completed_frames += completed;
+		pending_statistics.rescued_frames += completed && shards.recovered_packets > 0;
+		pending_statistics.incomplete_frames += !completed;
+	}
+	auto & feedback = shards.feedback;
 	if (not feedback.received_last_packet)
 		feedback.received_first_packet = instance.now();
 	auto scene = weak_scene.lock();

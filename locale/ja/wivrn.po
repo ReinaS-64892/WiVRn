@@ -1371,3 +1371,32 @@ msgstr "暗証番号を確認できませんでした"
 #: client/wivrn_client.cpp:194
 msgid "Pairing is disabled on server"
 msgstr "このサーバーではペアリングが無効です"
+
+msgid "FEC recovery"
+msgstr "FEC 復元"
+
+msgid "Recovered packets"
+msgstr "復元パケット"
+
+msgid "Incomplete video frames"
+msgstr "不完全な映像フレーム"
+
+msgid "Incomplete"
+msgstr "不完全"
+
+#, c++-format
+msgid "Video packets: {} data / {} repair; FEC recovered: {}"
+msgstr "映像パケット: データ {} / 修復用 {}; FEC 復元: {}"
+
+#, c++-format
+msgid "Video frames: {} complete / {} rescued by FEC / {} incomplete"
+msgstr "映像フレーム: 完成 {} / FEC で救済 {} / 不完全 {}"
+
+msgid "FEC statistics"
+msgstr "FEC 統計"
+
+msgid "Video packet recovery and incomplete frames."
+msgstr "映像パケットの復元と不完全なフレーム。"
+
+msgid "Frames are counted per eye/stream. FEC-rescued frames are included in complete frames."
+msgstr "フレームは各眼・ストリーム別に集計します。FEC 救済数は完成数の内数です。"

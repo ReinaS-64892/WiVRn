@@ -109,3 +109,21 @@ Interleave tests sweep every burst position, including parity losses and uneven
 real receiver. The encrypted sending callbacks test that parity is built before
 any source mutation.
 Actual headset performance and loss tolerance still require hardware testing.
+
+## Client statistics
+
+The separate **FEC statistics** sidebar page includes two graphs: recovered source
+packets and incomplete video frames, counted per render sample (no smoothing).
+Its counters total received source packets, valid repair packets, recovered
+source packets, completed frames, frames completed with at least one FEC
+recovery, and incomplete frames retired by the existing two-frame receiver.
+Recovered packet counts are recorded when their frame completes or retires,
+including recoveries that did not suffice to complete the frame. Rescued frames
+are a subset of completed frames; completion means submission to the decoder,
+not successful decoding or display. Each eye and optional alpha stream count
+independently. Totals start with the streaming scene and survive decoder
+reconfiguration once sampled. Receive counts include duplicate and late packets;
+late parity for a healthy completed frame does not count as a recovery.
+Unobserved frame IDs (including wholly lost frames) and buffered frames still
+awaiting an outcome are not counted as incomplete. These are receiver outcome
+statistics, not a measurement of network packet loss. No telemetry is uploaded.

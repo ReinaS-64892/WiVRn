@@ -24,6 +24,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 #include <vulkan/vulkan_raii.hpp>
@@ -46,9 +47,34 @@ class shard_accumulator
 	std::shared_ptr<decoder> decoder_;
 
 public:
+	// Counts are per encoded stream (eyes and alpha are independent).
+	struct statistics
+	{
+		uint64_t source_packets = 0;
+		uint64_t repair_packets = 0;
+		uint64_t recovered_packets = 0;
+		uint64_t completed_frames = 0;
+		uint64_t rescued_frames = 0;
+		uint64_t incomplete_frames = 0;
+
+		statistics & operator+=(const statistics & other)
+		{
+			source_packets += other.source_packets;
+			repair_packets += other.repair_packets;
+			recovered_packets += other.recovered_packets;
+			completed_frames += other.completed_frames;
+			rescued_frames += other.rescued_frames;
+			incomplete_frames += other.incomplete_frames;
+			return *this;
+		}
+	};
+	// Drain interval counters safely from the render thread.
+	statistics take_statistics();
+
 	using data_shard = wivrn::to_headset::video_stream_data_shard;
 	struct shard_set
 	{
+		uint64_t recovered_packets = 0;
 		std::map<uint16_t, to_headset::video_stream_repair_shard> repairs;
 		std::vector<std::optional<data_shard>> data;
 		void reset(uint64_t frame_index);
@@ -73,6 +99,8 @@ public:
 	};
 
 private:
+	std::mutex statistics_mutex;
+	statistics pending_statistics;
 	shard_set current;
 	shard_set next;
 	std::weak_ptr<scenes::stream> weak_scene;
@@ -115,7 +143,7 @@ private:
 	void inserted(shard_set &, std::optional<uint16_t>);
 	void try_submit_frame(std::optional<uint16_t> shard_idx);
 	void try_submit_frame(uint16_t shard_idx);
-	void send_feedback(wivrn::from_headset::feedback & feedback);
+	void send_feedback(shard_set & shards, bool completed = false);
 	void advance();
 };
 } // namespace wivrn

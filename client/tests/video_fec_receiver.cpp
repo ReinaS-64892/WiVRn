@@ -108,6 +108,13 @@ int main()
 			receiver.push_repair(parity(100));
 			receiver.push_shard(source(100, missing));
 			require(recording->completed.size() == 1);
+			auto stats = receiver.take_statistics();
+			require(stats.source_packets == 6 && stats.repair_packets == 2);
+			require(stats.recovered_packets == 1 && stats.completed_frames == 1 && stats.rescued_frames == 1);
+			require(stats.incomplete_frames == 0);
+			stats = receiver.take_statistics();
+			require(stats.source_packets == 0 && stats.repair_packets == 0 && stats.recovered_packets == 0);
+			require(stats.completed_frames == 0 && stats.rescued_frames == 0 && stats.incomplete_frames == 0);
 		}
 	for (bool with_repair: {false, true})
 	{
@@ -123,6 +130,10 @@ int main()
 		require(recording->completed.size() == 1 && recording->completed[0] == std::vector<uint8_t>({0, 1, 2, 3, 4, 5}));
 		receiver.push_repair(parity(100));
 		require(recording->completed.size() == 1);
+		auto stats = receiver.take_statistics();
+		require(stats.source_packets == 10 && stats.repair_packets == (with_repair ? 2 : 1));
+		require(stats.recovered_packets == 0 && stats.completed_frames == 1 && stats.rescued_frames == 0);
+		require(stats.incomplete_frames == 1); // Exclude unobserved startup frame IDs.
 	}
 	// Independent groups can recover out of order, while incremental decoder
 	// input must still be delivered once and in source order.
@@ -145,6 +156,10 @@ int main()
 		for (size_t i = 0; i < expected.size(); ++i)
 			expected[i] = i;
 		require(recording->completed.size() == 1 && recording->completed[0] == expected);
+		auto stats = grouped_receiver.take_statistics();
+		require(stats.completed_frames == 1 && stats.incomplete_frames == 0);
+		require(stats.recovered_packets == (lose_sources ? 3 : 0));
+		require(stats.rescued_frames == (lose_sources ? 1 : 0));
 	}
 	// A real receiver must recover each 1..4-packet burst at every position of
 	// two consecutive full windows, including the boundary and parity packets.
@@ -187,5 +202,29 @@ int main()
 	receiver.push_repair(parity(100));
 	receiver.push_repair(parity(101));
 	require(recording->completed.size() == 2);
+	auto stats = receiver.take_statistics();
+	require(stats.completed_frames == 2 && stats.rescued_frames == 2 && stats.recovered_packets == 2 && stats.incomplete_frames == 0);
+	// Recovery in one group need not rescue a frame with losses in another.
+	recording = std::make_shared<recording_decoder>();
+	wivrn::shard_accumulator partial(device, physical, instance, 0, description, {}, 0);
+	wivrn::video_fec_encoder encoder;
+	for (uint16_t i = 0; i < 16; ++i)
+	{
+		auto repair = encoder.push(source(400, i, 16), i == 15);
+		if (i != 2 && i != 9 && i != 10)
+			partial.push_shard(source(400, i, 16));
+		if (repair)
+			partial.push_repair(std::move(*repair));
+	}
+	for (uint16_t i = 0; i < 6; ++i)
+		partial.push_shard(source(401, i));
+	stats = partial.take_statistics();
+	require(stats.recovered_packets == 1 && stats.rescued_frames == 0);
+	require(stats.completed_frames == 1 && stats.incomplete_frames == 1);
+	// Invalid repair packets are excluded from the valid repair receive count.
+	auto invalid = parity(402);
+	invalid.source_count = 0;
+	partial.push_repair(std::move(invalid));
+	require(partial.take_statistics().repair_packets == 0);
 	std::cout << "First/middle/final recovery, reordered/duplicate repairs, two-frame buffering and original discard policy passed\n";
 }

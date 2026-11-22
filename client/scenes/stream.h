@@ -190,6 +190,7 @@ private:
 		system,
 	};
 	settings_page current_settings_page = settings_page::video;
+	bool show_fec_statistics = false; // Client-only statistics sub-page.
 	std::optional<int64_t> pending_absence_time;
 
 	// Tab currently being displayed
@@ -332,6 +333,8 @@ private:
 		float cpu_time = 0;
 		float bandwidth_rx = 0;
 		float bandwidth_tx = 0;
+		float fec_recovered = 0;
+		float incomplete_frames = 0;
 	};
 
 	struct plot
@@ -364,9 +367,11 @@ private:
 		float predicted_display;
 	};
 
+	wivrn::shard_accumulator::statistics video_statistics;
 	std::vector<global_metric> global_metrics{300};
 	std::vector<std::vector<decoder_metric>> decoder_metrics;
 	std::vector<float> axis_scale;
+	std::vector<float> fec_axis_scale;
 	XrTime last_metric_time = 0;
 	int metrics_offset = 0;
 
@@ -377,7 +382,7 @@ private:
 	float compact_gpu_time = 0;
 
 	void accumulate_metrics(XrTime predicted_display_time, const std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> & blit_handles, const gpu_timestamps & timestamps);
-	void gui_performance_metrics();
+	void gui_performance_metrics(bool fec_only = false);
 	void gui_compact_view();
 	void gui_settings(float predicted_display_period);
 	void gui_bitrate_settings(float predicted_display_period);
