@@ -28,6 +28,7 @@
 #include <openxr/openxr.h>
 #define GLM_FORCE_RADIANS
 
+#include "frame_selection.h"
 #include "stream.h"
 #include "video_diagnostics.h"
 
@@ -666,83 +667,11 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, 3> scenes::stream::c
 	if (decoders.empty())
 		return {};
 	std::unique_lock lock(frames_mutex);
-	inplace_vector<shard_accumulator::blit_handle *, decoder_count> common_frames;
 	const bool alpha = decoders[0].latest_frames[0] and decoders[0].latest_frames[0]->view_info.alpha;
-	for (size_t i = 0; i < view_count + alpha; ++i)
-	{
-		if (i == 0)
-		{
-			for (const auto & h: decoders[i].latest_frames)
-				if (h)
-					common_frames.push_back(h.get());
-		}
-		else
-		{
-			// clang-format off
-			erase_if(common_frames,
-				[this, i](auto & left)
-				{
-					return std::ranges::none_of(
-						decoders[i].latest_frames,
-						[&left](auto & right)
-						{
-							return right and left->feedback.frame_index == right->feedback.frame_index;
-						});
-				});
-			// clang-format on
-		}
-	}
-	std::array<std::shared_ptr<shard_accumulator::blit_handle>, decoder_count> result;
-	if (not common_frames.empty())
-	{
-		auto min = std::ranges::min_element(common_frames,
-		                                    std::ranges::less{},
-		                                    [display_time](auto frame) {
-			                                    if (not frame)
-				                                    return std::numeric_limits<XrTime>::max();
-			                                    return std::abs(frame->view_info.display_time - display_time);
-		                                    });
-
-		assert(*min);
-		auto frame_index = (*min)->feedback.frame_index;
-		for (auto [i, decoder]: utils::enumerate(decoders))
-		{
-			if (alpha or i < view_count)
-				result[i] = decoder.frame(frame_index);
-		}
-	}
-	else
-	{
-		spdlog::warn("Failed to find a common frame for all decoders, dumping available frames per decoder");
-		for (const auto & decoder: decoders)
-		{
-			std::string frames;
-			for (const auto & frame: decoder.latest_frames)
-			{
-				if (frame)
-					frames += " " + std::to_string(frame->feedback.frame_index);
-				else
-					frames += " -";
-			}
-			spdlog::warn(frames);
-		}
-
-		for (auto [i, decoder]: utils::enumerate(decoders))
-		{
-			if (alpha or i < view_count)
-			{
-				auto min = std::ranges::min_element(decoder.latest_frames,
-				                                    std::ranges::less{},
-				                                    [display_time](auto frame) {
-					                                    if (not frame)
-						                                    return std::numeric_limits<XrTime>::max();
-					                                    return std::abs(frame->view_info.display_time - display_time);
-				                                    });
-				result[i] = *min;
-			}
-		}
-	}
-	return result;
+	std::array<std::span<const std::shared_ptr<shard_accumulator::blit_handle>>, decoder_count> caches;
+	for (size_t i = 0; i < decoder_count; ++i)
+		caches[i] = decoders[i].latest_frames;
+	return wivrn::select_video_frames(caches, current_blit_handles, view_count + alpha, display_time);
 }
 
 std::shared_ptr<shard_accumulator::blit_handle> scenes::stream::accumulator_images::frame(uint64_t id) const
@@ -880,8 +809,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	if (device.waitForFences(*fence, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout)
 		throw std::runtime_error("Vulkan fence timeout");
 
-	// We don't need those after vkWaitForFences
-	current_blit_handles.fill(nullptr);
+	// Keep the previous images until selection: they are the progress floor
+	// and remain usable when the decoder's short cache has wrapped.
 
 	gpu_timestamps timestamps;
 	if (query_pool_filled)
@@ -1337,6 +1266,27 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		return;
 	spdlog::info("Creating decoders, size {}x{}", description.width, description.height);
 	video_stream_description = description;
+	video_diagnostics::get().record({.kind = "frame_sequence_reset", .xr_ns = instance.now()});
+	// A new decoder configuration establishes a new frame sequence. Release
+	// old held images only after the last GPU read, before destroying decoders.
+	if (std::ranges::any_of(current_blit_handles, [](const auto & image) { return bool(image); }))
+	{
+		if (device.waitForFences(*fence, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout)
+			throw std::runtime_error("Vulkan fence timeout during decoder setup");
+		current_blit_handles.fill(nullptr);
+	}
+	// Old decoder callbacks need this mutex too. Detach under the lock, then
+	// release image handles and join workers outside it, while their owners
+	// are still alive. Rendering sees empty caches during reconfiguration.
+	std::array<accumulator_images, decoder_count> retired_decoders;
+	std::swap(decoders, retired_decoders);
+	lock.unlock();
+	for (auto & item: retired_decoders)
+	{
+		item.latest_frames.fill(nullptr);
+		item.decoder.reset();
+	}
+	lock.lock();
 
 	for (const auto & [stream_index, item]: utils::enumerate(decoders))
 	{

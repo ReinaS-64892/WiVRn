@@ -30,8 +30,8 @@ by the video-wire test. Repeating view metadata costs bandwidth but avoids a sep
 reliable per-frame metadata dependency.
 
 The receiver buffers two frames. Complete access units are submitted immediately
-and exactly once. Incomplete access units have an absolute deadline in the
-headset's OpenXR clock domain:
+and exactly once. Incomplete access units initially use this receive cutoff in
+the headset's OpenXR clock domain:
 
 ```
 min(predicted_display_time - decode_reserve - 2 ms,
@@ -44,7 +44,7 @@ decay per decoded frame. The UDP receive budget starts at 4 ms (or the ceiling
 below, if smaller). Observations are grouped into four one-second clock buckets.
 Each retains up to 256 complete UDP assembly durations, with older samples
 replaced within a full bucket. At least eight complete samples are required to
-learn 1.5 times the fastest 75% mean, with a 2 ms floor. The ceiling is one
+learn 1.75 times the fastest 75% mean, with a 2 ms floor. The ceiling is one
 described video frame period clamped to 2–20 ms (90 fps fallback for an invalid
 rate). Slow successful outliers, truncated waits, decoder turnaround and TCP
 recovery do not train the normal mean.
@@ -61,15 +61,28 @@ Targets use the recent clock buckets. The applied cap updates at most once per
 second, rises by at most 0.5 ms per update and falls by at most 0.1 ms per update,
 with a 0.05 ms deadband. Even after an idle gap only one bounded step is applied.
 This removes packet-driven jumps and frame-rate-dependent decay. The recent
-late-arrival allowance must age out before the cap can decline. Existing armed
-deadlines are unchanged. Without view metadata,
+late-arrival allowance must age out before the cap can decline. The learned cap does not move an already armed frame deadline.
+
+For Iris/V4L2, the adaptive limit is now a soft cutoff. At this cutoff the
+receiver may grant one extension of at most 2 ms, anchored to the original
+cutoff. It must remain within the earlier of the first-packet frame-period cap
+and the predicted display cutoff (including the decode/render reserve). If
+that whole extension has already elapsed before the network thread wakes,
+it is not granted. Both buffered frames are serviced; silence cannot rearm the
+timer. Complete frames still submit immediately, and a newer complete frame
+preempts the old partial frame even during grace. TCP/reliable recovery frames,
+earlier display cutoffs and other decoder backends keep their existing policy.
+A complete frame rescued during grace also contributes to the bounded late-tail
+allowance. This is a short opportunity for a usable complete frame, not a claim
+that Iris will conceal incomplete VCL input. Without view metadata,
 the first-packet limit still applies. If the predicted cutoff was already past
 when the first packet arrived, use that same bounded first-packet budget. The
 server pacer starts with no decode/display samples; immediately dropping every
 fragment of a late first IDR would prevent the very feedback needed to calibrate
 its predictions. This fallback allows reference recovery without an unbounded
-wait. UDP deadlines never extend as more packets arrive; a packet arriving
-after retirement cannot reopen the frame.
+wait. Extra packets do not reset deadlines. The single Iris grace extension
+above is explicit and bounded; a packet arriving after final retirement cannot
+reopen the frame.
 
 Control/TCP video packets retain their transport provenance locally, without a
 wire format change. A frame containing reliable packets has a separate 100 ms
@@ -188,7 +201,7 @@ Run the registered tests from the build tree's common and client directories:
 
 ```sh
 ctest --test-dir BUILD_DIR/common -R 'video-' --output-on-failure
-ctest --test-dir BUILD_DIR/client -R 'shard-accumulator|video-diagnostics|receive-time-budget' --output-on-failure
+ctest --test-dir BUILD_DIR/client -R 'shard-accumulator|video-diagnostics|receive-time-budget|frame-selection' --output-on-failure
 ```
 
 ## Recorded limit adjustment (2026-11-22)
@@ -234,6 +247,41 @@ The log does not contain original packet indices or unit descriptors for every
 late packet; it cannot prove exactly how many frames a different timeout would
 have recovered, nor distinguish every late duplicate from a missing symbol.
 
+## Late-frame recovery and display order (2026-11-23)
+
+New logs:
+
+| Client commit | Recording suffix | Duration | Incomplete eye UDP frames | Backward display transitions |
+| --- | --- | ---: | ---: | ---: |
+| `1443f27d` | `1795361241141511957-94726-0` | 238.0 s | 2,377 / 42,140 (5.64%) | 100 |
+| `e907ac93` | `1795361783427188287-99098-0` | 115.3 s | 1,258 / 20,387 (6.17%) | 94 |
+
+Files are under `../log/wivrn-client-log/video-<suffix>.jsonl`. Key IDs by stream
+scene lifetime; display counts above sum both eyes, so a stereo backward step
+usually contributes two transitions. An example in the second recording is
+`48751 -> 48749`. Decoder output itself was monotonic in the observed sequences.
+The renderer could select newer per-eye fallback frames and then return to an
+older common frame left in its three-frame caches. This is an additional source
+of visible discontinuity, separate from repeated images due to real data loss.
+
+Frame selection now rejects every candidate older than that stream's preceding
+selected image. It prefers a common eligible frame near the display prediction,
+then falls back per stream without reversing progress. Previously selected
+images remain held across cache wrap until replacement, and are released after
+the GPU fence. A decoder reconfiguration clears the progress floor after that
+fence; a new scene naturally starts without an old floor. This prevents frame
+rollback; it cannot synthesize missing motion or guarantee the removal of all
+stutter. Losing one eye can still require per-eye fallback, as before.
+
+In the second recording, all 1,258 incomplete eye frames retired at the adaptive
+limit, with a median cap of 4 ms. 276 had another packet observed within 1 ms
+past that cutoff and 330 within 2 ms. This motivates the one-time Iris grace
+above, together with the requested 1.75 mean multiplier. It is not an exact
+prediction of repaired frames: late-packet records lack full source payload
+and descriptors, and some arrivals may be duplicates or still leave holes.
+There were 743 partial submissions and no matched decoded partial output in
+this recording. No change is made to accepting timestamp-less empty images.
+
 ## Client diagnostic recordings
 
 Use **Record diagnostics** on the server list, the connected application picker,
@@ -253,8 +301,9 @@ client process restart.
 
 JSON Lines schema 1 uses nanoseconds. The start record contains wall clock Unix
 time; subsequent events carry enqueue-time `mono_ns` and OpenXR `xr_ns` where
-available. Frame IDs are per stream and can reset after reconnect. Correlate
-using `stream_created`/`stream_destroyed` and `mono_ns`, not frame ID alone.
+available. Frame IDs are per stream and can reset after reconnect or decoder reconfiguration. Correlate
+using `stream_created`/`stream_destroyed`, `frame_sequence_reset` and `mono_ns`,
+not frame ID alone.
 Events include descriptions, decoder creation, first packets, retirement,
 submission return, decoded output, display/repeated display, network heartbeat,
 application launch requests, errors and Iris source-change/CAPTURE readiness.
@@ -290,6 +339,13 @@ is counted in the UI and final stop record. Stop drains and closes the file.
 A crash may leave the final line unfinished and omit the stop record; earlier
 complete lines remain usable. These are timing/decision logs, not packet payload
 or image dumps, nor a complete copy of the client's standard-output log.
+
+Grace is visible in `receive_grace` events: `deadline_ns` is the extended cutoff,
+`budget_ns` is the original soft budget, and `detail` includes the absolute hard
+cutoff as `hard_deadline_ns`. `grace_completed` means full source assembly before
+final retirement, not proof of later decode/display. The Late-frame grace graph
+and cumulative text show extensions and frames completed after extension; other
+loss graphs count only final decisions, not soft-cutoff visits.
 
 ## Recorded stability and slice retention (2026-11-22)
 

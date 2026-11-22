@@ -19,6 +19,11 @@ struct submission
 class recording_decoder : public wivrn::decoder
 {
 public:
+	XrDuration grace = 0;
+	XrDuration incomplete_frame_grace() const override
+	{
+		return grace;
+	}
 	std::vector<submission> frames;
 	std::vector<uint8_t> bytes;
 	void push_data(std::span<std::span<const uint8_t>> spans, uint64_t, bool partial) override
@@ -302,17 +307,17 @@ int main()
 		}
 		test_time += 9'000'000;
 	}
-	require(adaptive.current_receive_budget() == 3'000'000);
+	require(adaptive.current_receive_budget() == 3'500'000);
 	adaptive.push_shard(packet(1200, 0));
-	require(adaptive.next_deadline() == test_time + 3'000'000);
+	require(adaptive.next_deadline() == test_time + 3'500'000);
 	test_time = *adaptive.next_deadline();
 	adaptive.expire(test_time);
 	test_time += 300'000;
-	adaptive.push_shard(packet(1200, 1)); // 3.3 ms after the first packet
-	require(adaptive.current_receive_budget() == 3'000'000);
+	adaptive.push_shard(packet(1200, 1)); // 3.8 ms after the first packet
+	require(adaptive.current_receive_budget() == 3'500'000);
 	// A late duplicate of a complete frame must not inflate the timeout.
 	adaptive.push_shard(packet(1199, 1));
-	require(adaptive.current_receive_budget() == 3'000'000);
+	require(adaptive.current_receive_budget() == 3'500'000);
 	// Preserve an earlier display deadline. Its late symbols do not train the
 	// UDP tail allowance, since a larger UDP cap would not have saved it.
 	auto display_limited = packet(1201, 0);
@@ -323,7 +328,7 @@ int main()
 	adaptive.expire(test_time);
 	test_time += 4'000'000;
 	adaptive.push_shard(packet(1201, 1));
-	require(adaptive.current_receive_budget() == 3'000'000);
+	require(adaptive.current_receive_budget() == 3'500'000);
 
 	// TCP recovery IDRs can finish beyond both the UDP and display deadlines.
 	// A fresh receiver accepts high server frame IDs after reconnect.
@@ -419,5 +424,113 @@ int main()
 	for (auto count: slice_totals.deadline_slice_frames)
 		require(count == 1);
 	require(slice_totals.deadline_intact_slices == 10 && slice_totals.deadline_damaged_slices == 10);
+	// Iris-like decoders get one bounded chance to finish after the soft cap.
+	auto grace_receiver = [&] {
+		test_time += 20'000'000;
+		recording = std::make_shared<recording_decoder>();
+		recording->grace = 2'000'000;
+		return std::make_unique<wivrn::shard_accumulator>(device, physical_device, instance, 0, description, std::weak_ptr<scenes::stream>{}, 0);
+	};
+	auto start_frame = [&](wivrn::shard_accumulator & target, uint64_t frame, XrDuration display_offset = 100'000'000, bool reliable = false) {
+		for (int i = 0; i < 5; ++i)
+		{
+			auto data = packet(frame, i);
+			data.view_info->display_time = test_time + display_offset;
+			target.push_shard(std::move(data), reliable);
+		}
+	};
+	{
+		auto target = grace_receiver();
+		start_frame(*target, 0);
+		const auto soft = *target->next_deadline();
+		test_time = soft + 500'000;
+		target->push_shard(packet(0, 5));
+		auto counts = target->take_statistics();
+		require(recording->frames.size() == 1 && !recording->frames[0].feedback.stream_corrupted);
+		require(counts.grace_frames == 1 && counts.grace_completed == 1 && counts.expired == 0);
+		require(!target->next_deadline());
+	}
+	{
+		auto target = grace_receiver();
+		start_frame(*target, 0);
+		const auto soft = *target->next_deadline();
+		test_time = soft;
+		target->expire(test_time);
+		require(target->next_deadline() == soft + 2'000'000 && recording->frames.empty());
+		test_time = soft + 2'000'000;
+		target->push_shard(packet(0, 5)); // exact final boundary stays late
+		auto counts = target->take_statistics();
+		require(counts.grace_frames == 1 && counts.grace_completed == 0 && counts.expired == 1 && counts.late_packets == 1);
+		require(recording->frames.size() == 1 && recording->frames[0].feedback.stream_corrupted);
+		target->expire(test_time + 20'000'000);
+		require(!target->next_deadline()); // no second extension
+	}
+	{
+		auto target = grace_receiver();
+		const auto first = test_time;
+		start_frame(*target, 0, 11'000'000); // reserve 6 ms -> absolute cutoff at +5 ms
+		test_time = *target->next_deadline();
+		target->expire(test_time);
+		require(target->next_deadline() == first + 5'000'000);
+		test_time = *target->next_deadline();
+		target->expire(test_time);
+		require(target->take_statistics().expired == 1 && !target->next_deadline());
+	}
+	{
+		auto target = grace_receiver();
+		start_frame(*target, 0, 9'000'000); // display deadline precedes the soft cap
+		test_time = *target->next_deadline();
+		target->expire(test_time);
+		require(target->take_statistics().grace_frames == 0 && !target->next_deadline());
+	}
+	{
+		auto target = grace_receiver();
+		start_frame(*target, 0);
+		test_time = *target->next_deadline() + 3'000'000; // scheduler missed all grace
+		target->push_shard(packet(0, 5));
+		auto counts = target->take_statistics();
+		require(counts.grace_frames == 0 && counts.late_packets == 1 && counts.expired == 1);
+	}
+	{
+		auto target = grace_receiver();
+		start_frame(*target, 0);
+		test_time = *target->next_deadline();
+		start_frame(*target, 1);
+		target->push_shard(packet(1, 5));
+		require(recording->frames.size() == 2 && recording->frames.back().feedback.frame_index == 1);
+		require(!target->next_deadline()); // ready newer frame preempts grace immediately
+	}
+	{
+		auto target = grace_receiver();
+		const auto first = test_time;
+		start_frame(*target, 0);
+		test_time += 1'000'000;
+		start_frame(*target, 1);
+		test_time = first + 5'000'000;
+		target->expire(test_time); // both slots have reached their soft cap
+		require(target->next_deadline() == first + 6'000'000);
+		test_time = *target->next_deadline();
+		target->expire(test_time);
+		require(target->next_deadline() == first + 7'000'000);
+		test_time = *target->next_deadline();
+		target->expire(test_time);
+		auto counts = target->take_statistics();
+		require(counts.grace_frames == 2 && counts.expired == 2 && !target->next_deadline());
+	}
+	{
+		auto target = grace_receiver();
+		start_frame(*target, 0, 100'000'000, true);
+		test_time = *target->next_deadline();
+		target->expire(test_time);
+		require(target->take_statistics().grace_frames == 0 && !target->next_deadline());
+	}
+	{
+		description.frame_rate = 1000;
+		auto target = grace_receiver();
+		start_frame(*target, 0);
+		test_time = *target->next_deadline();
+		target->expire(test_time);
+		require(target->take_statistics().grace_frames == 0 && !target->next_deadline());
+	}
 	std::cout << "Accumulator: deadlines, silence, late packets, statistics, decode reserve, slice histograms and frame assembly passed\n";
 }

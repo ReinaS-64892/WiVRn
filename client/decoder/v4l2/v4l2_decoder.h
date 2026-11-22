@@ -177,6 +177,10 @@ public:
 		return *ycbcr_sampler;
 	}
 	bool needs_manual_linear_filtering() const override { return sampling_filter == vk::Filter::eNearest; }
+	XrDuration incomplete_frame_grace() const override
+	{
+		return 2'000'000;
+	}
 
 	static bool available_for(wivrn::video_codec codec);
 	static bool supports_10bit(wivrn::video_codec codec);

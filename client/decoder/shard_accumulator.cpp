@@ -44,6 +44,8 @@ void shard_set::reset(uint64_t frame_index)
 	reliable = false;
 	assembled_at = 0;
 	receive_limit = 0;
+	hard_deadline.reset();
+	grace_used = false;
 
 	uint8_t stream_index = feedback.stream_index;
 	feedback = {};
@@ -69,7 +71,7 @@ static bool is_complete(const shard_set & shards)
 	return true;
 }
 
-std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable_transport)
+std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable_transport, XrDuration hard_wait)
 {
 	// A source symbol must belong to the range advertised by its unit.
 	const auto & unit = shard.unit;
@@ -81,6 +83,7 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDur
 		feedback.received_first_packet = now;
 		receive_limit = max_wait;
 		deadline = now + max_wait;
+		hard_deadline = now + (hard_wait > 0 ? hard_wait : max_wait);
 	}
 	if (reliable_transport && !reliable)
 	{
@@ -88,6 +91,7 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDur
 		// those at the short UDP loss timeout can prevent decoder startup.
 		reliable = true;
 		deadline = feedback.received_first_packet + 100'000'000;
+		hard_deadline = deadline;
 	}
 	if (!reliable && shard.view_info && shard.view_info->display_time > 0)
 	{
@@ -96,7 +100,10 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, XrTime now, XrDur
 		// An already-unusable prediction must not discard every fragment of the
 		// first IDR and prevent the feedback needed to calibrate that pacer.
 		if (predicted_deadline > feedback.received_first_packet)
-			deadline = std::min(*deadline, predicted_deadline);
+		{
+			hard_deadline = std::min(*hard_deadline, predicted_deadline);
+			deadline = std::min(*deadline, *hard_deadline);
+		}
 	}
 	if (first)
 		video_diagnostics::get().record({.kind = "frame_first_packet", .xr_ns = now, .frame = shard.frame_idx, .stream = shard.stream_item_idx, .deadline_ns = *deadline, .display_ns = shard.view_info ? shard.view_info->display_time : 0, .budget_ns = reliable ? 100'000'000 : max_wait, .reliable = reliable});
@@ -134,6 +141,8 @@ shard_accumulator::statistics & shard_accumulator::statistics::operator+=(const 
 		deadline_slice_frames[i] += other.deadline_slice_frames[i];
 	deadline_intact_slices += other.deadline_intact_slices;
 	deadline_damaged_slices += other.deadline_damaged_slices;
+	grace_frames += other.grace_frames;
+	grace_completed += other.grace_completed;
 	return *this;
 }
 
@@ -180,10 +189,35 @@ void shard_accumulator::expire(XrTime now)
 	{
 		if (now < *deadline)
 			break;
+		// Both slots can have reached their soft cutoff. Extend only once,
+		// anchored to the original limit, never relative to a late wakeup.
+		const bool extended_current = extend_for_late_symbols(current, now);
+		const bool extended_next = extend_for_late_symbols(next, now);
+		if (extended_current || extended_next)
+			continue;
 		finish_current(true);
 		advance();
 		try_submit_frame();
 	}
+}
+
+bool shard_accumulator::extend_for_late_symbols(shard_set & frame, XrTime now)
+{
+	const auto grace = std::clamp<XrDuration>(decoder_->incomplete_frame_grace(), 0, 2'000'000);
+	if (!grace || frame.reliable || frame.grace_used || !frame.deadline || now < *frame.deadline ||
+	    *frame.deadline != frame.feedback.received_first_packet + frame.receive_limit || !frame.hard_deadline)
+		return false;
+	const auto extended = std::min(*frame.deadline + grace, *frame.hard_deadline);
+	if (extended <= now)
+		return false;
+	frame.grace_used = true;
+	frame.deadline = extended;
+	{
+		std::lock_guard lock(statistics_mutex);
+		++pending_statistics.grace_frames;
+	}
+	video_diagnostics::get().record({.kind = "receive_grace", .detail = fmt::format("hard_deadline_ns={}", *frame.hard_deadline), .xr_ns = now, .frame = frame.frame_index(), .stream = frame.feedback.stream_index, .first_ns = frame.feedback.received_first_packet, .deadline_ns = extended, .budget_ns = frame.receive_limit});
+	return true;
 }
 
 static void debug_incomplete_frame(const shard_set & shards)
@@ -248,12 +282,12 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard, bool reliab
 	}
 	else if (frame_diff == 0)
 	{
-		if (current.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable))
+		if (current.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable, max_wait))
 			try_submit_frame();
 	}
 	else if (frame_diff == 1)
 	{
-		next.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable);
+		next.insert(std::move(shard), now, assembly_budget.value(), reserve, reliable, max_wait);
 		if (is_complete(next))
 		{
 			finish_current();
@@ -347,10 +381,14 @@ void shard_accumulator::finish_current(bool expired)
 		retired_frames[current.frame_index() % retired_frames.size()] = {
 		        .frame = current.frame_index(),
 		        .first_packet = current.feedback.received_first_packet,
-		        .adaptive_expiry = !complete && expired && current.deadline == current.feedback.received_first_packet + current.receive_limit,
+		        .adaptive_expiry = !complete && expired && (current.grace_used || current.deadline == current.feedback.received_first_packet + current.receive_limit),
 		};
 		if (complete)
+		{
 			assembly_budget.complete(std::max<XrDuration>(0, current.assembled_at - current.feedback.received_first_packet), now);
+			if (current.grace_used)
+				assembly_budget.late(std::max<XrDuration>(0, current.assembled_at - current.feedback.received_first_packet), now);
+		}
 		else
 			assembly_budget.incomplete(now);
 		published_receive_budget.store(assembly_budget.value(), std::memory_order_relaxed);
@@ -405,6 +443,7 @@ void shard_accumulator::finish_current(bool expired)
 		pending_statistics.partial += submit && !complete;
 		pending_statistics.dropped += !submit;
 		pending_statistics.expired += expired;
+		pending_statistics.grace_completed += complete && current.grace_used && !current.reliable;
 		++pending_statistics.wait_samples;
 		pending_statistics.wait_sum += wait;
 		pending_statistics.wait_max = std::max(pending_statistics.wait_max, wait);
@@ -425,6 +464,8 @@ void shard_accumulator::finish_current(bool expired)
 			pending_statistics.deadline_damaged_slices += damaged_vcl;
 		}
 	}
+	if (complete && current.grace_used && !current.reliable)
+		video_diagnostics::get().record({.kind = "grace_completed", .xr_ns = now, .frame = current.frame_index(), .stream = current.feedback.stream_index, .wait_ns = wait});
 	if (submit)
 	{
 		current.feedback.sent_to_decoder = now;

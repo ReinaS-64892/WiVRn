@@ -62,7 +62,7 @@ int main()
 	wivrn::receive_time_budget trimmed(11'111'111);
 	for (int frame = 0; frame <= 32 * 12; ++frame)
 		trimmed.complete(frame % 4 == 3 ? 8'000'000 : 2'000'000, int64_t(frame) * second / 32);
-	require(trimmed.value() == 3'000'000);
+	require(trimmed.value() == 3'500'000);
 	// Persistent loss still increases the target, with the same rate limit.
 	wivrn::receive_time_budget loss(11'111'111);
 	for (int frame = 0; frame <= 600; ++frame)

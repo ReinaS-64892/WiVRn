@@ -1502,3 +1502,20 @@ msgstr "締切時の生存枚数別フレーム累計：0枚={}、1枚={}、2枚
 #, c++-format
 msgid "Slices at deadline: {} intact, at least {} damaged. Entirely unseen slices are unknown."
 msgstr "締切時のスライス累計：生存 {} 枚、欠損は少なくとも {} 枚。全パケット未受信のスライス数は不明です。"
+
+#: client/scenes/stream_gui.cpp
+msgid "Late-frame grace"
+msgstr "遅着フレームの猶予"
+
+#: client/scenes/stream_gui.cpp
+msgid "Grace used"
+msgstr "猶予待ちへ移行"
+
+#: client/scenes/stream_gui.cpp
+msgid "Completed during grace"
+msgstr "猶予中に全体が到着"
+
+#: client/scenes/stream_gui.cpp
+#, c++-format
+msgid "Late-frame grace: {} waits, {} completed frames. Newer complete frames take priority."
+msgstr "遅着猶予の累計：待機 {} 件、全体到着 {} 件。完成済みの後続フレームを優先します。"

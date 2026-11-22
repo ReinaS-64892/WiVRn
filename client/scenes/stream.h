@@ -343,6 +343,7 @@ private:
 		float no_slice = 0;
 		float partial_unsupported = 0;
 		float deadline_slices_0 = 0, deadline_slices_1 = 0, deadline_slices_2 = 0, deadline_slices_3 = 0, deadline_slices_4_plus = 0;
+		float grace_frames = 0, grace_completed = 0;
 	};
 
 	struct plot

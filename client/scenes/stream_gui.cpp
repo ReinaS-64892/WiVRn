@@ -147,6 +147,8 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	network_metric.deadline_slices_2 = received.deadline_slice_frames[2];
 	network_metric.deadline_slices_3 = received.deadline_slice_frames[3];
 	network_metric.deadline_slices_4_plus = received.deadline_slice_frames[4];
+	network_metric.grace_frames = received.grace_frames;
+	network_metric.grace_completed = received.grace_completed;
 	for (auto & item: decoders)
 		if (item.decoder)
 			network_metric.receive_budget = std::max(network_metric.receive_budget, item.decoder->current_receive_budget() * 1e-9f);
@@ -236,6 +238,9 @@ void scenes::stream::gui_performance_metrics()
 	                                    {_("Partial decoding unsupported"), &global_metric::partial_unsupported}}, "frames"),
 
 	        plot(_("Late video packets"), {{"", &global_metric::late_video_packets}}, "packets"),
+
+	        plot(_("Late-frame grace"), {{_("Grace used"), &global_metric::grace_frames},
+	                                    {_("Completed during grace"), &global_metric::grace_completed}}, "frames"),
 
 	        plot(_("Intact slices at deadline"), {{_("0 slices"), &global_metric::deadline_slices_0},
 	                                             {_("1 slice"), &global_metric::deadline_slices_1},
@@ -421,6 +426,7 @@ void scenes::stream::gui_performance_metrics()
 		const auto & slices = video_receive_totals.deadline_slice_frames;
 		ImGui::TextWrapped("%s", fmt::format(_F("Deadline frames by intact slices: 0={}, 1={}, 2={}, 3={}, 4+={}"), slices[0], slices[1], slices[2], slices[3], slices[4]).c_str());
 		ImGui::TextWrapped("%s", fmt::format(_F("Slices at deadline: {} intact, at least {} damaged. Entirely unseen slices are unknown."), video_receive_totals.deadline_intact_slices, video_receive_totals.deadline_damaged_slices).c_str());
+		ImGui::TextWrapped("%s", fmt::format(_F("Late-frame grace: {} waits, {} completed frames. Newer complete frames take priority."), video_receive_totals.grace_frames, video_receive_totals.grace_completed).c_str());
 		ImGui::TextUnformatted(fmt::format(_F("Unobserved frame IDs: {} (may include frames skipped by the server)"), video_receive_totals.unobserved_frames).c_str());
 		ImGui::TextUnformatted(
 		        fmt::format(

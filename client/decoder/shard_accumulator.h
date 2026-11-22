@@ -58,10 +58,12 @@ public:
 		bool reliable = false;
 		XrTime assembled_at = 0;
 		XrDuration receive_limit = 0;
+		std::optional<XrTime> hard_deadline;
+		bool grace_used = false;
 		void reset(uint64_t frame_index);
 		bool empty() const;
 
-		std::optional<uint16_t> insert(data_shard &&, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable);
+		std::optional<uint16_t> insert(data_shard &&, XrTime now, XrDuration max_wait, XrDuration reserve, bool reliable, XrDuration hard_wait = 0);
 
 		wivrn::from_headset::feedback feedback{};
 
@@ -99,6 +101,8 @@ public:
 		std::array<uint64_t, 5> deadline_slice_frames{}; // 0, 1, 2, 3, 4+ intact VCL NALs
 		uint64_t deadline_intact_slices = 0;
 		uint64_t deadline_damaged_slices = 0; // Lower bound: wholly unseen NALs are unknown.
+		uint64_t grace_frames = 0;
+		uint64_t grace_completed = 0;
 		statistics & operator+=(const statistics &);
 	};
 
@@ -173,5 +177,6 @@ private:
 	void advance();
 	void finish_current(bool expired = false);
 	static XrDuration receive_budget(float frame_rate);
+	bool extend_for_late_symbols(shard_set &, XrTime now);
 };
 } // namespace wivrn

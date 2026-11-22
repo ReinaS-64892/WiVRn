@@ -74,6 +74,12 @@ public:
 	virtual vk::Sampler sampler() = 0;
 	// Nearest-only decoders need interpolation after the sampler's conversion.
 	virtual bool needs_manual_linear_filtering() const { return false; }
+	// Backends that rarely conceal partial access units may benefit from a
+	// short bounded wait for late source symbols before receiving partial input.
+	virtual XrDuration incomplete_frame_grace() const
+	{
+		return 0;
+	}
 
 	static const std::vector<wivrn::video_codec_capability> & supported_codecs();
 	static bool supports_10bit(wivrn::video_codec codec);

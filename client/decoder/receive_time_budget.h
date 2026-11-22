@@ -65,7 +65,7 @@ class receive_time_budget
 			int64_t total = 0;
 			for (size_t i = 0; i < fast_count; ++i)
 				total += samples[i];
-			target = std::clamp<int64_t>((total / fast_count) * 3 / 2, 2'000'000, limit);
+			target = std::clamp<int64_t>((total / fast_count) * 7 / 4, 2'000'000, limit);
 		}
 		target = std::max({target, tail, recovery});
 		// A small deadband avoids chasing measurement noise. Rise by at most
