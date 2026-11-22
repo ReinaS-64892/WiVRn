@@ -191,6 +191,10 @@ if(WIVRN_BUILD_TEST AND NOT ANDROID)
     target_include_directories(wivrn-video-fec-receiver-test PRIVATE $<TARGET_PROPERTY:wivrn,INCLUDE_DIRECTORIES>)
     target_compile_definitions(wivrn-video-fec-receiver-test PRIVATE $<TARGET_PROPERTY:wivrn,COMPILE_DEFINITIONS>)
     add_test(NAME video-fec-receiver COMMAND wivrn-video-fec-receiver-test)
+
+    add_executable(wivrn-ranges-test tests/ranges.cpp)
+    target_include_directories(wivrn-ranges-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME ranges COMMAND wivrn-ranges-test)
 endif()
 
 if(NOT ANDROID)

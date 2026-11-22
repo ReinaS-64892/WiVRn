@@ -270,7 +270,9 @@ void scenes::stream::gui_performance_metrics(bool fec_only)
 			ImGui::SameLine();
 	}
 
-	for (auto && [index, metrics]: utils::enumerate(std::span(decoder_metrics).first(fec_only ? 0 : decoder_metrics.size())))
+	// enumerate borrows its range; keep the view alive for the entire loop.
+	auto plotted_decoders = std::span(decoder_metrics).first(fec_only ? 0 : decoder_metrics.size());
+	for (auto && [index, metrics]: utils::enumerate(plotted_decoders))
 	{
 		std::string title = fmt::format(_F("Decoder {}"), std::to_string(index));
 		if (ImPlot::BeginPlot(title.c_str(), plot_size, ImPlotFlags_NoTitle | ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText))

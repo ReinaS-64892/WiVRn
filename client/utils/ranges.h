@@ -116,4 +116,9 @@ enumerate_range<T> enumerate(T & t)
 	return {t};
 }
 
+// The returned range stores a reference. A temporary input would leave it
+// dangling on compilers without C++23 range-for lifetime extension.
+template <typename T>
+void enumerate(const T &&) = delete;
+
 } // namespace utils
