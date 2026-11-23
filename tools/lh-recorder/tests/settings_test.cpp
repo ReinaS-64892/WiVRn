@@ -24,7 +24,11 @@ int main(int argc, char ** argv)
 	// FEC dashboard persistence and the server use the same validated configuration.
 	Settings fec;
 	fec.loadJson("{}");
-	require(fec.videoFecEnabled() && fec.videoFecSources() == 8 && fec.videoFecRepairs() == 8 && fec.videoFecRepairDelayUs() == 1000);
+	require(!fec.videoFecEnabled() && fec.videoFecSources() == 8 && fec.videoFecRepairs() == 8 && fec.videoFecRepairDelayUs() == 1000);
+	fec.set_videoFecEnabled(true);
+	Settings enabled_copy;
+	enabled_copy.loadJson(fec.saveJson());
+	require(enabled_copy.videoFecEnabled());
 	fec.set_videoFecSources(4);
 	fec.set_videoFecRepairs(2);
 	fec.set_videoFecRepairDelayUs(500);
@@ -48,11 +52,11 @@ int main(int argc, char ** argv)
 		require(parsed.interleave() == 16 || parsed.interleave() * sources >= 64);
 	}
 	fec.loadJson(R"({"video-fec":{"sources":18446744073709551615,"repairs":-1,"enabled":"invalid","repair-delay-us":1.5},"unrelated":42})");
-	require(fec.videoFecEnabled() && fec.videoFecSources() == 8 && fec.videoFecRepairs() == 8 && fec.videoFecRepairDelayUs() == 1000);
+	require(!fec.videoFecEnabled() && fec.videoFecSources() == 8 && fec.videoFecRepairs() == 8 && fec.videoFecRepairDelayUs() == 1000);
 	fec.set_videoFecRepairDelayUs(0);
 	require(fec.videoFecRepairDelayUs() == 0);
 	fec.restore_defaults();
-	require(fec.videoFecRepairDelayUs() == 1000 && fec.saveJson().contains("unrelated") && !fec.saveJson().contains("video-fec"));
+	require(!fec.videoFecEnabled() && fec.videoFecRepairDelayUs() == 1000 && fec.saveJson().contains("unrelated") && !fec.saveJson().contains("video-fec"));
 	fec.loadJson(R"({"video-fec":false})");
 	fec.set_videoFecEnabled(false);
 	require(!fec.videoFecEnabled() && fec.videoFecSources() == 8);

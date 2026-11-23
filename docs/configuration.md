@@ -401,7 +401,7 @@ fall back to the VR TCP connection or to ADB TCP forwarding.
 
 ## `video-fec`
 
-The dashboard exposes `video-fec` with `enabled` (default true on this branch),
+The dashboard exposes `video-fec` with `enabled` (default false),
 `sources` (1–16, default 8), `repairs` (1–8, default 8), and `repair-delay-us`
 (0–5000, default 1000). Interleave depth is automatic, targeting 64 sources per
 window with at most 16 groups. Changes apply on the next streaming session.

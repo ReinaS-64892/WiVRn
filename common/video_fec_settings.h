@@ -10,7 +10,7 @@ namespace wivrn
 {
 struct video_fec_settings
 {
-	bool enabled = true;
+	bool enabled = false;
 	uint8_t sources = 8;
 	uint8_t repairs = 8;
 	uint32_t repair_delay_us = 1000;

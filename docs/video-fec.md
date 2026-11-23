@@ -19,7 +19,7 @@ submits the frame immediately without waiting for repairs.
 The server dashboard Settings page provides an FEC enable switch, sources per
 block (1–16), repairs per full block (1–8), and repair delay in microseconds
 (0–5000, default 1000). Settings apply to the next streaming session and work
-with every encoder backend. FEC remains enabled by default on this branch.
+with every encoder backend. FEC is disabled by default; enable it explicitly in the dashboard.
 Interleave depth is automatic: `min(16, ceil(64 / sources))`. Thus 4, 8 and 16
 sources select up to 16, 8 and 4 groups respectively. Uneven block sizes can
 round the window slightly above 64 sources; very small blocks hit the 16-group
@@ -36,7 +36,7 @@ Remove existing launch variables to control FEC entirely from the dashboard:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `WIVRN_VIDEO_FEC` | enabled | `0` disables repairs and restores unprotected packetization |
+| `WIVRN_VIDEO_FEC` | disabled | `0` disables repairs and restores unprotected packetization |
 | `WIVRN_VIDEO_FEC_SCHEME` | `rs` | `rs` or `xor` |
 | `WIVRN_VIDEO_FEC_SOURCES` | `8` | Maximum sources per RS block, integer 1–16; ignored for XOR |
 | `WIVRN_VIDEO_FEC_REPAIRS` | `8` | RS repairs per full block, integer 1–8; ignored for XOR |
