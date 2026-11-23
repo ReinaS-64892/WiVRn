@@ -92,7 +92,7 @@ bool video_fec_diagnostics::start(const std::filesystem::path & directory)
 		fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 		if (fd < 0)
 			throw std::system_error(errno, std::generic_category(), "Creating diagnostic recording");
-		write_all(fd, fmt::format("{{\"kind\":\"start\",\"schema\":2,\"purpose\":\"video_fec\",\"unix_ns\":{},\"mono_ns\":{},\"time_unit\":\"ns\",\"client_commit\":\"{}\",\"protocol_revision\":{}}}\n", now, video_fec_diagnostics::now(), wivrn::git_commit, wivrn::protocol_revision));
+		write_all(fd, fmt::format("{{\"kind\":\"start\",\"schema\":3,\"purpose\":\"video_fec\",\"unix_ns\":{},\"mono_ns\":{},\"time_unit\":\"ns\",\"client_commit\":\"{}\",\"protocol_revision\":{}}}\n", now, video_fec_diagnostics::now(), wivrn::git_commit, wivrn::protocol_revision));
 		stopping = false;
 		writer = std::thread(&video_fec_diagnostics::write_events, this, fd);
 		generation.store(++next_generation, std::memory_order_relaxed);

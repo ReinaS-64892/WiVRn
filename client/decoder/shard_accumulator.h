@@ -85,7 +85,7 @@ public:
 			bool partial_capture = false;
 		} diagnostics;
 		uint64_t recovered_packets = 0;
-		std::map<uint16_t, to_headset::video_stream_repair_shard> repairs;
+		std::map<uint16_t, std::vector<to_headset::video_stream_repair_shard>> repairs;
 		std::vector<std::optional<data_shard>> data;
 		void reset(uint64_t frame_index);
 		bool empty() const;
@@ -119,7 +119,7 @@ private:
 	std::deque<retired_frame> recently_damaged;
 	void observe_packet(shard_set &, bool repair, uint16_t index, size_t bytes);
 	void record_retirement(const shard_set &, bool complete, const char * reason);
-	void record_late(uint64_t frame, bool repair, uint16_t index, uint8_t count);
+	void record_late(uint64_t frame, bool repair, uint16_t index, uint8_t count, uint8_t scheme = 0, uint8_t repair_index = 0, uint8_t repair_count = 0);
 
 	std::mutex statistics_mutex;
 	statistics pending_statistics;

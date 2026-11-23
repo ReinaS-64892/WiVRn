@@ -12,6 +12,8 @@
 namespace wivrn
 {
 inline constexpr size_t video_fec_group_size = 8;
+inline constexpr size_t video_rs_group_size = 16;
+inline constexpr size_t video_rs_max_repairs = 4;
 
 // Protect the serialized source body, including optional first/last metadata.
 // Source datagrams keep their original layout. Leave room for the larger repair
@@ -35,12 +37,15 @@ inline std::vector<uint8_t> video_fec_source_bytes(const to_headset::video_strea
 
 inline bool valid_video_repair(const to_headset::video_stream_repair_shard & repair)
 {
-	if (!repair.source_count || repair.source_count > video_fec_group_size ||
+	if (!repair.source_count || repair.source_count > video_rs_group_size ||
+	    repair.scheme > 1 || !repair.repair_count || repair.repair_count > video_rs_max_repairs ||
+	    repair.repair_index >= repair.repair_count ||
+	    (!repair.scheme && (repair.source_count > video_fec_group_size || repair.repair_count != 1)) ||
 	    size_t(repair.first_shard) + repair.source_count > size_t(UINT16_MAX) + 1 ||
 	    repair.payload.empty() || repair.payload.size() > video_fec_symbol_capacity())
 		return false;
 	size_t maximum = 0;
-	for (size_t i = 0; i < video_fec_group_size; ++i)
+	for (size_t i = 0; i < video_rs_group_size; ++i)
 	{
 		if (i < repair.source_count)
 		{
@@ -100,7 +105,7 @@ inline std::optional<to_headset::video_stream_data_shard> recover_video_packet(
         const to_headset::video_stream_repair_shard & repair,
         const std::vector<std::optional<to_headset::video_stream_data_shard>> & sources)
 {
-	if (!valid_video_repair(repair))
+	if (!valid_video_repair(repair) || repair.scheme != 0)
 		return {};
 	std::optional<uint16_t> missing;
 	const size_t end = size_t(repair.first_shard) + repair.source_count;

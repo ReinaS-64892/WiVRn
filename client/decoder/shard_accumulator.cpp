@@ -20,7 +20,7 @@
 #include "shard_accumulator.h"
 #include "scenes/stream.h" // IWYU pragma: keep
 #include "spdlog/spdlog.h"
-#include "video_fec.h"
+#include "video_reed_solomon.h"
 #include "xr/instance.h"
 #include <utility>
 
@@ -82,7 +82,7 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, xr::instance & in
 	if (group != repairs.begin())
 	{
 		--group;
-		if (idx < size_t(group->first) + group->second.source_count)
+		if (idx < size_t(group->first) + group->second.front().source_count)
 			if (auto recovered = recover(group->first))
 				return std::min(idx, *recovered);
 	}
@@ -94,14 +94,18 @@ std::optional<uint16_t> shard_set::recover(uint16_t first)
 	auto it = repairs.find(first);
 	if (it == repairs.end())
 		return {};
-	auto recovered = recover_video_packet(it->second, data);
-	if (!recovered)
+	auto recovered = recover_video_packets(it->second, data);
+	if (recovered.empty())
 		return {};
-	const auto index = recovered->shard_idx;
-	if (data.size() <= index)
-		data.resize(index + 1);
-	data[index] = std::move(*recovered);
-	++recovered_packets;
+	const auto index = recovered.front().shard_idx;
+	for (auto & packet: recovered)
+	{
+		const auto idx = packet.shard_idx;
+		if (data.size() <= idx)
+			data.resize(size_t(idx) + 1);
+		data[idx] = std::move(packet);
+	}
+	recovered_packets += recovered.size();
 	return index;
 }
 
@@ -112,17 +116,27 @@ std::optional<uint16_t> shard_set::insert(to_headset::video_stream_repair_shard 
 	if (empty())
 		feedback.received_first_packet = instance.now();
 	const auto first = repair.first_shard;
-	// Canonical sender groups do not overlap. Reject conflicting ranges.
+	// Multiple independent repair symbols may cover the same canonical block.
+	if (auto existing = repairs.find(first); existing != repairs.end())
+	{
+		auto & symbols = existing->second;
+		if (!same_video_repair_block(symbols.front(), repair) ||
+		    std::ranges::any_of(symbols, [&](const auto & symbol) { return symbol.repair_index == repair.repair_index; }))
+			return {};
+		symbols.push_back(std::move(repair));
+		return recover(first);
+	}
+	// Different canonical blocks cannot overlap.
 	auto next = repairs.lower_bound(first);
 	if (next != repairs.end() && next->first < size_t(first) + repair.source_count)
 		return {};
 	if (next != repairs.begin())
 	{
 		auto previous = std::prev(next);
-		if (size_t(previous->first) + previous->second.source_count > first)
+		if (size_t(previous->first) + previous->second.front().source_count > first)
 			return {};
 	}
-	repairs.emplace(first, std::move(repair));
+	repairs.emplace(first, std::vector<video_stream_repair_shard>{std::move(repair)});
 	return recover(first);
 }
 
@@ -219,13 +233,15 @@ void shard_accumulator::push_repair(video_stream_repair_shard && repair)
 		std::lock_guard lock(statistics_mutex);
 		++pending_statistics.repair_packets;
 	}
-	if (auto target = select_frame(repair.frame_idx))
+	// Healthy frames often complete before their trailing repairs arrive. Keep
+	// explicit diagnostic recording, but avoid an info log for every such packet.
+	if (auto target = repair.frame_idx < current.frame_index() ? nullptr : select_frame(repair.frame_idx))
 	{
 		observe_packet(*target, true, repair.first_shard, repair.payload.size());
 		inserted(*target, target->insert(std::move(repair), instance));
 	}
 	else
-		record_late(repair.frame_idx, true, repair.first_shard, repair.source_count);
+		record_late(repair.frame_idx, true, repair.first_shard, repair.source_count, repair.scheme, repair.repair_index, repair.repair_count);
 }
 
 void shard_accumulator::try_submit_frame(std::optional<uint16_t> shard_idx)

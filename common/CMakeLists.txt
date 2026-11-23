@@ -86,6 +86,9 @@ target_link_libraries(wivrn-common PUBLIC wivrn-forwarding Boost::pfr OpenSSL::C
 target_compile_definitions(wivrn-common PUBLIC VULKAN_HPP_NO_STRUCT_CONSTRUCTORS)
 
 if(WIVRN_BUILD_TEST)
+    add_executable(wivrn-video-rs-test tests/video_reed_solomon.cpp)
+    target_link_libraries(wivrn-video-rs-test PRIVATE wivrn-common)
+    add_test(NAME video-rs COMMAND wivrn-video-rs-test)
     add_executable(wivrn-video-fec-test tests/video_fec.cpp)
     target_link_libraries(wivrn-video-fec-test PRIVATE wivrn-common)
     add_test(NAME video-fec COMMAND wivrn-video-fec-test)

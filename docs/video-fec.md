@@ -1,115 +1,136 @@
 # Packet-level video FEC
 
 Branch `feat/video-fec` starts at `70485093`, before the slice/receive-deadline
-experiments on `feat/video-transport-resilience`. The experimental branch is
-retained separately. This implementation adds video packet recovery without
+experiments on `feat/video-transport-resilience`. It adds packet recovery without
 changing encoder slice/tile settings, decoder error handling, receive waiting,
-or frame selection. Client statistics and opt-in FEC diagnostics are described
-below.
+or frame selection. Reed-Solomon (RS) is the default; XOR remains available for
+comparisons. No cross-eye buffering or coalescing is used.
 
-## Wire format
+## Recovery and configuration
 
-The original `video_stream_data_shard` layout is retained. View/pose information
-is still on the first source packet, and timing/frame-end information is still
-on the last. A new `video_stream_repair_shard` variant contains:
+The sender uses a systematic Cauchy Reed-Solomon erasure code over GF(256).
+Original video packets are sent unchanged in format; repairs are separate
+packets. A full block contains 16 sources and, by default, two repair packets.
+Any 16 of those 18 packets suffice to recover all sources. Thus two lost sources,
+or one lost source plus one lost repair, are recoverable. Receiving all sources
+submits the frame immediately without waiting for repairs.
+
+Configure these in the **server process environment**:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `WIVRN_VIDEO_FEC` | enabled | `0` disables repairs and restores unprotected packetization |
+| `WIVRN_VIDEO_FEC_SCHEME` | `rs` | `rs` or `xor` |
+| `WIVRN_VIDEO_FEC_REPAIRS` | `2` | RS repair packets per 16 sources, integer 1–4; ignored for XOR |
+| `WIVRN_VIDEO_FEC_INTERLEAVE` | `4` | Maximum groups per window, integer 1–4 |
+
+Invalid scheme/count/depth values are logged and fall back to their defaults.
+The server logs each stream's selected scheme, full-block sizes, interleave
+depth and enabled state at encoder creation. Client configuration is unnecessary.
+For a stronger RS comparison, set `WIVRN_VIDEO_FEC_REPAIRS=4`.
+
+Full 16+2 blocks add 12.5% repair packets; 16+4 adds 25%. Headers, padding and
+short blocks increase byte overhead. Encoder bitrate is unchanged, so repairs
+increase total network traffic. The RS repair count for a short block of K
+sources is `ceil(K * configured_repairs / 16)`, at least one. For example, the
+default uses one repair for K=1–8 and two for K=9–16. This is a fixed code rate,
+not adaptive congestion control. Losing more symbols than a block's repair
+budget remains unrecoverable, regardless of the session's average loss rate.
+
+## Sending and interleaving
+
+Only already encoded data is grouped. No window crosses an encoder output
+buffer, stream or frame. No sleep, timer, separate sending thread or wait for
+future output is introduced. Small per-NAL encoder callbacks can therefore
+produce short blocks even when a whole frame is large.
+
+An RS window contains up to 64 sources at the default four-group depth. The
+sender uses `ceil(N/16)` balanced consecutive source ranges, whose sizes differ
+by at most one, then emits one symbol per group in round-robin order. Each
+group's repairs follow its own sources and participate in the same schedule.
+For a full 64-source, 16+2 window:
+
+```
+0,16,32,48, 1,17,33,49, ... 15,31,47,63,
+repairA0,repairB0,repairC0,repairD0,
+repairA1,repairB1,repairC1,repairD1
+```
+
+This full window tolerates any single burst of up to eight emitted datagrams,
+including repairs, assuming all other packets arrive. With four repairs per
+block the full window tolerates sixteen. Short/uneven windows, multiple bursts
+and losses crossing window boundaries have different limits; there is no
+blanket eight-packet guarantee for arbitrary frames.
+
+XOR uses the previous balanced groups of at most eight sources, one repair per
+group, and at most 32 sources per window. Source ordering and group boundaries
+in XOR mode retain the previous scheduler behavior. The new wire header is
+shared by both schemes, so XOR comparisons also require the new client.
+
+All repairs for a window are computed **before the first source is sent**:
+transport encryption mutates source payload spans in place. Repairs then use
+normal transport encryption. Original source spans borrow the live encoder
+buffer; temporary parity/source-body storage is bounded by the current window.
+Reordering delays some contiguous decoder input relative to sequential sending;
+actual latency and CPU cost still need hardware measurement.
+
+## Wire format and code definition
+
+Protocol revision 3 requires matching server and client builds. The original
+`video_stream_data_shard` layout is retained: first-packet view/pose metadata and
+last-packet timing/frame-end metadata keep their existing placement. The repair
+variant contains:
 
 | Field | Meaning |
 | --- | --- |
-| stream_item_idx, frame_idx | Protected stream and frame |
-| first_shard | First protected source packet index |
-| source_count | Number of consecutive protected packets, 1–8 |
-| source_sizes[8] | Serialized source-body lengths; unused entries are zero |
-| payload | XOR of the serialized source bodies, zero-padded to the longest |
+| `stream_item_idx`, `frame_idx` | Protected stream and frame |
+| `first_shard`, `source_count` | Consecutive protected source range |
+| `scheme` | 0 = XOR (1–8 sources), 1 = RS (1–16 sources) |
+| `repair_index`, `repair_count` | Independent repair equation index and total number sent (1–4 for RS) |
+| `source_sizes[16]` | Serialized source-body lengths; unused entries must be zero |
+| `payload` | Coded body, zero-padded to the longest source |
 
-The protected body includes the original source header, optional metadata and
-video payload, excluding the outer packet type tag. This allows exact recovery
-of a lost first or last packet, including the metadata needed for decoding and
-frame completion. The algorithm is codec-independent and has no NAL/slice
-boundary descriptors. A repair's payload is never interpreted as video.
+The protected body includes the source header, optional metadata and video
+payload, excluding the outer packet type tag. First/last packets can therefore
+be reconstructed exactly, including the metadata needed for decoding. This is
+codec-independent and works across encoder backends; repairs are never video.
+Source and repair datagrams fit the 1400-byte serialized wire budget before
+transport encryption. Source payloads reserve room for the larger repair header.
 
-With interleaving enabled (the default), the sender prepares at most 32 source
-packets from the already available encoder output buffer. It divides each window
-into up to four consecutive source ranges of at most eight packets, then sends
-one symbol per group in round-robin order. Each group's last symbol is its
-repair. For a full window this gives:
+The field polynomial is `0x11d`, with primitive element 2. The systematic
+encoding matrix is `[I; C]`, where `C[r,i] = inverse((16+r) XOR i)` for repair
+indices r=0–3 and local source indices i=0–15. The two index sets are disjoint,
+so all square Cauchy submatrices are invertible. This permits recovery from any
+K of K+R symbols. XOR uses coefficient 1 for every source instead.
+This is WiVRn's own packet format and matrix definition, not an implementation
+of the RFC 5510 wire protocol. There is no additional library dependency.
 
-```
-0,8,16,24, 1,9,17,25, ... 7,15,23,31, repairA,repairB,repairC,repairD
-```
-
-Short windows use ceil(N/8) balanced groups whose sizes differ by at most one.
-Repairs participate in the same round-robin schedule, including when another
-group is still sending data. This keeps a tail source separated from its own
-repair and does not add repair packets compared to the original grouping of
-that window. For example, nine sources use groups of five and four:
-
-```
-0,5, 1,6, 2,7, 3,8, 4,repairB, repairA
-```
-
-Within a window of G groups, any single contiguous burst of up to G emitted
-video datagrams (including repairs) leaves at most one erasure in each group.
-Thus a full four-group window tolerates a burst of four, assuming the other
-packets arrive. A shorter buffer/window has fewer groups and less burst
-protection. Multiple bursts or two missing symbols in a group can still defeat
-recovery; this is not a multi-erasure code within each group.
-
-Windows never cross encoder output buffers, streams or frames. In particular,
-small per-NAL encoder callbacks may offer only one group even when a whole frame
-contains more data. The sender adds no sleep, timer or wait for a later encoder
-output; it reorders only already encoded data and flushes the final partial
-window immediately. Reordering does delay some early contiguous source data
-relative to sequential sending, so decoder input timing still needs hardware
-measurement. Temporary storage is bounded to 32 source descriptors and four
-repair symbols per send call; source payloads reference the live encoder buffer.
-
-All group parity is captured before the first send, because UDP encryption
-mutates source payload spans in place. Repairs then use normal transport
-encryption. Existing TCP/control delivery and FEC-disabled source order are
-unchanged.
-
-With FEC enabled, source and repair datagrams fit the 1400-byte serialized wire
-budget before transport encryption. On protected UDP video, source payloads
-reserve enough room for the larger repair header. Variable source lengths
-accommodate the first/last metadata without repeating it on every source.
-
-## Receiver and compatibility
+## Receiver and validation
 
 The existing current/next frame buffering and incremental decoder submission
-are retained. Repairs use separate storage; exactly one missing source in a
-group can be recovered. Received operand lengths and identifiers, repair ranges
-and reconstructed packet fields are checked before inserting the recovered
-source into its original slot. Duplicated/overlapping repairs and retired-frame
-repairs cannot cause a second submission. Two source losses in the same group
-remain unrecoverable. Complete frames do not wait for parity. There is no new
-receive timer, partial-slice decode path, or decoder fallback.
+remain. The receiver stores distinct repair equations by block and repair index.
+On a source or repair arrival it attempts recovery when missing source count
+is at most the number of received independent repairs. It solves only the
+missing-symbol system (at most 4x4), validates every reconstructed source, then
+inserts the entire recovered set atomically in the original source slots.
+Complete frames do not wait for parity. There is no new receive timer or partial
+decode policy.
 
-The new packet variant changes the automatic protocol hash (revision 2).
-Install matching server and client builds; neither the base branch nor the
-older experimental branch is wire-compatible with this branch. Interleaving
-itself changes only sender scheduling/group boundaries, not the protocol: the
-FEC-only client from `61123918` already supports this sender.
+Repair counts/indices, ranges, lengths, unused size fields and body budgets are
+validated. Conflicting/overlapping block descriptions and duplicate repair
+indices cannot add recovery rank. Reconstructed stream/frame/shard IDs, lengths
+and zero padding must match before insertion. Retired packets cannot submit a
+frame twice. Erasure coding assumes received packets are intact; it is not a
+substitute for transport integrity checks.
 
-`WIVRN_VIDEO_FEC=0` in the **server process environment** disables repair
-transmission and retains the original source packetization. FEC is enabled by
-default. `WIVRN_VIDEO_FEC_INTERLEAVE=1` selects sequential 8+1 sending for an A/B
-comparison; values 2, 3 or 4 select that maximum group depth (default 4).
-Out-of-range/non-integer values are logged and fall back to 4. These settings
-belong to the server process environment. No client configuration is needed.
-Full groups add one packet per eight
-sources; headers, short output buffers and padding increase byte overhead
-beyond the nominal 12.5%. Encoder bitrate is unchanged. This is a fixed XOR
-scheme, not adaptive congestion control or a multi-erasure code.
-
-Tests cover source/repair serialization and wire limits, every single missing
-position, first/last metadata, unequal symbol lengths, multiple groups, multiple
-loss rejection, malformed groups, transport encryption, reordered/duplicate
-arrivals, and insertion through the real shard accumulator with a mock decoder.
-Interleave tests sweep every burst position, including parity losses and uneven
-1–32-source windows, and exercise bursts across consecutive full windows in the
-real receiver. The encrypted sending callbacks test that parity is built before
-any source mutation.
-Actual headset performance and loss tolerance still require hardware testing.
+Tests exhaust all erasure patterns up to R for full 16+1/2/3/4 blocks and short
+blocks, including lost repairs. They compare decoded bytes/metadata, use an
+independent polynomial GF multiplication oracle, and exercise in-place encrypted
+wire round trips. Sender burst schedules cover uneven windows and wire budgets.
+The actual accumulator with a mock decoder is tested for every erasure pattern
+within 16+2 and 16+4 budgets, reordered/duplicate/conflicting repairs, and
+capacity-vs-missing-repair diagnostic classification. Previous XOR regressions
+remain. Hardware streaming performance and outcome rates require real trials.
 
 ## Client statistics
 
@@ -142,7 +163,7 @@ recorder's directory and name format:
   `~/.local/state/wivrn/logs/video-*.jsonl`. Relative XDG values are ignored.
 - Android: the application's configuration directory, under `logs/`.
 
-The schema-2 start record identifies `purpose: video_fec`, the client commit,
+The schema-3 start record identifies `purpose: video_fec`, the client commit,
 protocol revision and clock units. Each `frame` record describes a receiver
 outcome, including healthy frames for a denominator. `receiver` distinguishes
 decoder instances and reconnects; `stream` distinguishes eyes/alpha.
@@ -153,9 +174,13 @@ decoder instances and reconnects; `stream` distinguishes eyes/alpha.
 | `sources_rx`, `repairs_rx`, `payload_bytes` | Received packets/payload bytes for this frame while recording; includes duplicates |
 | `present`, `expected_min`, `end_known`, `missing_min` | Present source slots after FEC and a lower bound on absent slots; missing tail packets cannot be counted without end metadata |
 | `missing_without_repair` | Known missing slots with no received repair covering them at retirement |
-| `multiple_missing_groups` | Received repair groups still missing two or more sources, beyond XOR recovery capacity |
+| `multiple_missing_groups` | Received repair blocks still missing two or more sources; not necessarily beyond RS capacity |
+| `xor_blocks`, `rs_blocks_by_repairs` | Observed distinct XOR blocks, and RS block counts by declared repair budget 1/2/3/4; blocks whose repairs have not arrived are unknown |
+| `over_capacity_groups` | Damaged blocks whose missing source count exceeds the total repair count sent |
+| `insufficient_repair_groups` | Damaged blocks within the sent repair budget, but with too few distinct repairs received at retirement |
+| `recoverable_unrecovered_groups` | Damaged blocks with enough distinct received repairs; indicates reconstruction/validation did not succeed |
 | `unrecovered_single_groups` | Received repair groups with one remaining hole; indicates reconstruction/validation did not succeed |
-| `missing`, `damaged_groups` | Missing source indices and damaged groups' first index, count and relative missing bitmask |
+| `missing`, `damaged_groups` | Missing source indices and damaged blocks' first index, count, relative missing bitmask, scheme, repair budget, distinct received repair count and repair-index bitmask |
 | `max_gap_ns`, `receive_span_ns`, `age_ns` | Largest gap between this frame's arrivals, first-to-last arrival span and first-arrival-to-retirement time |
 | `partial_capture` | Recording began/restarted after some of this frame's packets had already arrived |
 
@@ -167,7 +192,8 @@ counts exclude packet headers and are not link bitrate.
 
 For the last 32 incomplete or FEC-rescued frames per receiver, `late` records
 identify subsequently received original packets and repair ranges, with elapsed
-time since retirement and `complete_at_retire`. These show confirmed lateness;
+time since retirement and `complete_at_retire`. Late repair records also include
+the scheme, repair index and total repair count. These show confirmed lateness;
 absence of a late record does not prove permanent loss. A missing repair may
 have been lost, delayed, or not sent; variable sender group sizes cannot be
 inferred for groups whose repair has not arrived. Wholly unseen frame IDs and

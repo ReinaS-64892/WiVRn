@@ -41,7 +41,7 @@
 namespace wivrn
 {
 
-static constexpr int protocol_revision = 2;
+static constexpr int protocol_revision = 3;
 
 enum class device_id : uint8_t
 {
@@ -895,7 +895,7 @@ public:
 	data_holder data;
 };
 
-// One XOR symbol protecting up to eight consecutive serialized video packets.
+// A systematic erasure-code repair protecting consecutive serialized video packets.
 // Source packet layout and metadata placement remain unchanged.
 struct video_stream_repair_shard
 {
@@ -903,7 +903,11 @@ struct video_stream_repair_shard
 	uint64_t frame_idx;
 	uint16_t first_shard;
 	uint8_t source_count;
-	std::array<uint16_t, 8> source_sizes{};
+	// 0: legacy XOR (up to 8 sources); 1: Cauchy Reed-Solomon (up to 16).
+	uint8_t scheme = 0;
+	uint8_t repair_index = 0;
+	uint8_t repair_count = 1;
+	std::array<uint16_t, 16> source_sizes{};
 	std::span<uint8_t> payload;
 	data_holder data;
 };
