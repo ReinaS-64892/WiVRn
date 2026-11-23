@@ -90,6 +90,55 @@ Kirigami.ScrollablePage {
                 Kirigami.FormData.isSection: true
             }
 
+            Controls.CheckBox {
+                text: i18n("Video packet recovery (FEC)")
+                checked: Settings.videoFecEnabled
+                onToggled: Settings.videoFecEnabled = checked
+            }
+
+            Controls.SpinBox {
+                Kirigami.FormData.label: i18n("Source packets per FEC block:")
+                enabled: Settings.videoFecEnabled
+                from: 1
+                to: 16
+                stepSize: 1
+                editable: true
+                value: Settings.videoFecSources
+                onValueModified: Settings.videoFecSources = value
+            }
+
+            Controls.SpinBox {
+                Kirigami.FormData.label: i18n("Repair packets per FEC block:")
+                enabled: Settings.videoFecEnabled
+                from: 1
+                to: 8
+                stepSize: 1
+                editable: true
+                value: Settings.videoFecRepairs
+                onValueModified: Settings.videoFecRepairs = value
+            }
+
+            Controls.SpinBox {
+                Kirigami.FormData.label: i18n("Repair packet delay (µs):")
+                enabled: Settings.videoFecEnabled
+                from: 0
+                to: 5000
+                stepSize: 100
+                editable: true
+                value: Settings.videoFecRepairDelayUs
+                onValueModified: Settings.videoFecRepairDelayUs = value
+            }
+
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: i18n("Interleaving adjusts automatically to the block size, targeting 64 source packets per window (up to 16 groups). Available packets are sent without waiting to fill the window. Changes apply to the next streaming session. FEC applies to UDP video.")
+            }
+
+            Kirigami.Separator {
+                Kirigami.FormData.isSection: true
+            }
+
             SelectGame {
                 id: select_game
                 Kirigami.FormData.label: i18n("Autostart application:")

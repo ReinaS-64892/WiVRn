@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "video_fec_settings.h"
 #include "wivrn_packets.h"
 
 #include <map>
@@ -43,6 +44,7 @@ struct encoder_settings
 	std::map<std::string, std::string> options; // additional encoder-specific configuration
 	int bit_depth;
 	std::optional<std::string> device;
+	video_fec_settings video_fec;
 };
 
 std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle &, wivrn_session &);

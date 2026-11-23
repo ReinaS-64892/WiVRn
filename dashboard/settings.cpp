@@ -22,6 +22,7 @@
 #include "lighthouse_reference_settings.h"
 #include "port_forwarding_config.h"
 #include "pose_prediction.h"
+#include "video_fec_settings.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QUrl>
@@ -126,6 +127,10 @@ void Settings::emitAllChanged()
 	tenbitChanged();
 	portForwardingChanged();
 	tcpOnlyChanged();
+	videoFecEnabledChanged();
+	videoFecSourcesChanged();
+	videoFecRepairsChanged();
+	videoFecRepairDelayUsChanged();
 	applicationChanged();
 	openvrChanged();
 	debugGuiChanged();
@@ -688,6 +693,72 @@ QString Settings::portForwardingError() const
 	return {};
 }
 
+bool Settings::videoFecEnabled() const
+{
+	return wivrn::parse_video_fec_settings(m_jsonSettings).enabled;
+}
+
+void Settings::set_videoFecEnabled(const bool & value)
+{
+	auto old = videoFecEnabled();
+	if (!m_jsonSettings["video-fec"].is_object())
+		m_jsonSettings["video-fec"] = nlohmann::json::object();
+	m_jsonSettings["video-fec"]["enabled"] = value;
+	if (old != value)
+		videoFecEnabledChanged();
+}
+
+int Settings::videoFecSources() const
+{
+	return wivrn::parse_video_fec_settings(m_jsonSettings).sources;
+}
+
+void Settings::set_videoFecSources(const int & value)
+{
+	if (value < 1 || value > 16)
+		return;
+	auto old = videoFecSources();
+	if (!m_jsonSettings["video-fec"].is_object())
+		m_jsonSettings["video-fec"] = nlohmann::json::object();
+	m_jsonSettings["video-fec"]["sources"] = value;
+	if (old != value)
+		videoFecSourcesChanged();
+}
+
+int Settings::videoFecRepairs() const
+{
+	return wivrn::parse_video_fec_settings(m_jsonSettings).repairs;
+}
+
+void Settings::set_videoFecRepairs(const int & value)
+{
+	if (value < 1 || value > 8)
+		return;
+	auto old = videoFecRepairs();
+	if (!m_jsonSettings["video-fec"].is_object())
+		m_jsonSettings["video-fec"] = nlohmann::json::object();
+	m_jsonSettings["video-fec"]["repairs"] = value;
+	if (old != value)
+		videoFecRepairsChanged();
+}
+
+int Settings::videoFecRepairDelayUs() const
+{
+	return wivrn::parse_video_fec_settings(m_jsonSettings).repair_delay_us;
+}
+
+void Settings::set_videoFecRepairDelayUs(const int & value)
+{
+	if (value < 0 || value > 5000)
+		return;
+	auto old = videoFecRepairDelayUs();
+	if (!m_jsonSettings["video-fec"].is_object())
+		m_jsonSettings["video-fec"] = nlohmann::json::object();
+	m_jsonSettings["video-fec"]["repair-delay-us"] = value;
+	if (old != value)
+		videoFecRepairDelayUsChanged();
+}
+
 bool Settings::tcpOnly() const
 {
 	auto it = m_jsonSettings.find("tcp-only");
@@ -836,6 +907,7 @@ void Settings::restore_defaults()
 	m_jsonSettings.erase("port-forwarding");
 	m_jsonSettings.erase("port-forwarding-port");
 	m_jsonSettings.erase("tcp-only");
+	m_jsonSettings.erase("video-fec");
 	m_jsonSettings.erase("application");
 	m_jsonSettings.erase("port");
 	m_jsonSettings.erase("hostname");

@@ -168,6 +168,11 @@ std::unique_ptr<video_encoder> video_encoder::create(
 	if (not res)
 		throw std::runtime_error("Failed to create encoder " + settings.encoder_name);
 
+	res->video_fec = settings.video_fec.enabled;
+	res->video_fec_sources = settings.video_fec.sources;
+	res->video_fec_repairs = settings.video_fec.repairs;
+	res->video_fec_repair_delay_us = settings.video_fec.repair_delay_us;
+
 	if (auto value = std::getenv("WIVRN_VIDEO_FEC"))
 		res->video_fec = std::string_view(value) != "0";
 	if (auto value = std::getenv("WIVRN_VIDEO_FEC_SCHEME"))
@@ -186,7 +191,7 @@ std::unique_ptr<video_encoder> video_encoder::create(
 		if (error == std::errc{} && end == text.data() + text.size() && count >= 1 && count <= video_rs_group_size)
 			res->video_fec_sources = count;
 		else
-			U_LOG_W("Invalid WIVRN_VIDEO_FEC_SOURCES '%s'; using 16", value);
+			U_LOG_W("Invalid WIVRN_VIDEO_FEC_SOURCES '%s'; keeping configured value", value);
 	}
 	if (auto value = std::getenv("WIVRN_VIDEO_FEC_REPAIRS"))
 	{
@@ -196,8 +201,12 @@ std::unique_ptr<video_encoder> video_encoder::create(
 		if (error == std::errc{} && end == text.data() + text.size() && count >= 1 && count <= video_rs_max_repairs)
 			res->video_fec_repairs = count;
 		else
-			U_LOG_W("Invalid WIVRN_VIDEO_FEC_REPAIRS '%s'; using 2", value);
+			U_LOG_W("Invalid WIVRN_VIDEO_FEC_REPAIRS '%s'; keeping configured value", value);
 	}
+	// Derive depth after the legacy source-count override, too.
+	auto effective_fec = settings.video_fec;
+	effective_fec.sources = res->video_fec_rs ? res->video_fec_sources : video_fec_group_size;
+	res->video_fec_interleave = effective_fec.interleave();
 	if (auto value = std::getenv("WIVRN_VIDEO_FEC_INTERLEAVE"))
 	{
 		const std::string_view text(value);
@@ -206,7 +215,7 @@ std::unique_ptr<video_encoder> video_encoder::create(
 		if (error == std::errc{} && end == text.data() + text.size() && depth >= 1 && depth <= video_fec_max_interleave_depth)
 			res->video_fec_interleave = depth;
 		else
-			U_LOG_W("Invalid WIVRN_VIDEO_FEC_INTERLEAVE '%s'; using %zu", value, video_fec_interleave_depth);
+			U_LOG_W("Invalid WIVRN_VIDEO_FEC_INTERLEAVE '%s'; keeping configured value", value);
 	}
 	if (auto value = std::getenv("WIVRN_VIDEO_FEC_REPAIR_DELAY_US"))
 	{
@@ -216,7 +225,7 @@ std::unique_ptr<video_encoder> video_encoder::create(
 		if (error == std::errc{} && end == text.data() + text.size() && delay <= 5000)
 			res->video_fec_repair_delay_us = delay;
 		else
-			U_LOG_W("Invalid WIVRN_VIDEO_FEC_REPAIR_DELAY_US '%s'; using 0", value);
+			U_LOG_W("Invalid WIVRN_VIDEO_FEC_REPAIR_DELAY_US '%s'; keeping configured value", value);
 	}
 	if (res->video_fec && res->video_fec_repair_delay_us)
 		res->delayed_repairs = std::make_unique<video_fec_repair_queue>();

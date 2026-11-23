@@ -398,3 +398,12 @@ For an ADB TCP-only WiVRn connection, also reverse this TCP port (for example,
 `adb reverse tcp:9758 tcp:9758`). TCP application forwarding can then work over
 that separate connection. UDP forwarding requires IP connectivity; it does not
 fall back to the VR TCP connection or to ADB TCP forwarding.
+
+## `video-fec`
+
+The dashboard exposes `video-fec` with `enabled` (default true on this branch),
+`sources` (1–16, default 8), `repairs` (1–8, default 8), and `repair-delay-us`
+(0–5000, default 1000). Interleave depth is automatic, targeting 64 sources per
+window with at most 16 groups. Changes apply on the next streaming session.
+Server `WIVRN_VIDEO_FEC*` environment overrides take precedence; remove these
+launch variables to use dashboard settings. See [video-fec.md](video-fec.md).

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "lighthouse_reference_settings.h"
 #include "settings.h"
+#include "video_fec_settings.h"
 #include "wivrn_server.h"
 #include <QCoreApplication>
 #include <QUrl>
@@ -20,6 +21,41 @@ void require(bool condition)
 int main(int argc, char ** argv)
 {
 	QCoreApplication app(argc, argv);
+	// FEC dashboard persistence and the server use the same validated configuration.
+	Settings fec;
+	fec.loadJson("{}");
+	require(fec.videoFecEnabled() && fec.videoFecSources() == 8 && fec.videoFecRepairs() == 8 && fec.videoFecRepairDelayUs() == 1000);
+	fec.set_videoFecSources(4);
+	fec.set_videoFecRepairs(2);
+	fec.set_videoFecRepairDelayUs(500);
+	fec.set_videoFecEnabled(false);
+	Settings fec_copy;
+	fec_copy.loadJson(fec.saveJson());
+	auto parsed = wivrn::parse_video_fec_settings(nlohmann::json::parse(fec_copy.saveJson().toStdString()));
+	require(!parsed.enabled && parsed.sources == 4 && parsed.repairs == 2 && parsed.repair_delay_us == 500 && parsed.interleave() == 16);
+	require(!fec_copy.videoFecEnabled() && fec_copy.videoFecSources() == 4 && fec_copy.videoFecRepairs() == 2 && fec_copy.videoFecRepairDelayUs() == 500);
+	fec.set_videoFecSources(0);
+	fec.set_videoFecRepairs(9);
+	fec.set_videoFecRepairDelayUs(-1);
+	fec.set_videoFecRepairDelayUs(5001);
+	require(fec.videoFecSources() == 4 && fec.videoFecRepairs() == 2 && fec.videoFecRepairDelayUs() == 500);
+	for (int sources = 1; sources <= 16; ++sources)
+	{
+		fec.set_videoFecSources(sources);
+		parsed = wivrn::parse_video_fec_settings(nlohmann::json::parse(fec.saveJson().toStdString()));
+		require(parsed.sources == sources && parsed.interleave() >= 1 && parsed.interleave() <= 16);
+		// A full automatic window covers the target unless the group limit is reached.
+		require(parsed.interleave() == 16 || parsed.interleave() * sources >= 64);
+	}
+	fec.loadJson(R"({"video-fec":{"sources":18446744073709551615,"repairs":-1,"enabled":"invalid","repair-delay-us":1.5},"unrelated":42})");
+	require(fec.videoFecEnabled() && fec.videoFecSources() == 8 && fec.videoFecRepairs() == 8 && fec.videoFecRepairDelayUs() == 1000);
+	fec.set_videoFecRepairDelayUs(0);
+	require(fec.videoFecRepairDelayUs() == 0);
+	fec.restore_defaults();
+	require(fec.videoFecRepairDelayUs() == 1000 && fec.saveJson().contains("unrelated") && !fec.saveJson().contains("video-fec"));
+	fec.loadJson(R"({"video-fec":false})");
+	fec.set_videoFecEnabled(false);
+	require(!fec.videoFecEnabled() && fec.videoFecSources() == 8);
 	qputenv("XDG_DATA_HOME", "/tmp/lh-xdg-data");
 	Settings a;
 	a.loadJson("{}");

@@ -164,6 +164,7 @@ configuration::configuration()
 	try
 	{
 		auto json = read_configuration();
+		video_fec = parse_video_fec_settings(json);
 
 		if (auto it = json.find("grip-surface"); it != json.end())
 		{

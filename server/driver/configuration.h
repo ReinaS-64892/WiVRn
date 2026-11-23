@@ -22,6 +22,7 @@
 #include "hostname.h"
 #include "lighthouse_backend.h"
 #include "lighthouse_recording_defaults.h"
+#include "video_fec_settings.h"
 #include "wivrn_config.h"
 #include <array>
 #include <chrono>
@@ -71,6 +72,7 @@ struct configuration
 	std::optional<float> lh_stick_deadzone;
 	bool hid_forwarding = false;
 	bool tcp_only = false;
+	video_fec_settings video_fec;
 	std::vector<forwarding_rule> port_forwarding;
 	uint16_t port_forwarding_port = 9758;
 	int port = wivrn::default_port;

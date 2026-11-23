@@ -11,27 +11,42 @@ comparisons. No cross-eye buffering or coalescing is used.
 The sender uses a systematic Cauchy Reed-Solomon erasure code over GF(256).
 Original video packets are sent unchanged in format; repairs are separate
 packets. Source block size and repair count are independently configurable.
-By default, a full block contains 16 sources and two repair packets.
-Any 16 of those 18 packets suffice to recover all sources. Thus two lost sources,
-or one lost source plus one lost repair, are recoverable. Receiving all sources
+By default, a full block contains eight sources and eight repair packets.
+Any eight of those 16 packets suffice to recover all sources. The nominal
+repair overhead is 100%. Receiving all sources
 submits the frame immediately without waiting for repairs.
 
-Configure these in the **server process environment**:
+The server dashboard Settings page provides an FEC enable switch, sources per
+block (1–16), repairs per full block (1–8), and repair delay in microseconds
+(0–5000, default 1000). Settings apply to the next streaming session and work
+with every encoder backend. FEC remains enabled by default on this branch.
+Interleave depth is automatic: `min(16, ceil(64 / sources))`. Thus 4, 8 and 16
+sources select up to 16, 8 and 4 groups respectively. Uneven block sizes can
+round the window slightly above 64 sources; very small blocks hit the 16-group
+limit. No waiting is added to fill a window.
+
+The persistent server JSON uses:
+
+```json
+{"video-fec": {"enabled": true, "sources": 8, "repairs": 8, "repair-delay-us": 1000}}
+```
+
+Legacy **server process environment** variables still override these settings.
+Remove existing launch variables to control FEC entirely from the dashboard:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WIVRN_VIDEO_FEC` | enabled | `0` disables repairs and restores unprotected packetization |
 | `WIVRN_VIDEO_FEC_SCHEME` | `rs` | `rs` or `xor` |
-| `WIVRN_VIDEO_FEC_SOURCES` | `16` | Maximum sources per RS block, integer 1–16; ignored for XOR |
-| `WIVRN_VIDEO_FEC_REPAIRS` | `2` | RS repairs per full block, integer 1–8; ignored for XOR |
-| `WIVRN_VIDEO_FEC_INTERLEAVE` | `4` | Maximum groups per window, integer 1–16 |
-| `WIVRN_VIDEO_FEC_REPAIR_DELAY_US` | `0` | Repair delay after the window's last source send, integer 0–5000 microseconds; 500 = 0.5 ms |
+| `WIVRN_VIDEO_FEC_SOURCES` | `8` | Maximum sources per RS block, integer 1–16; ignored for XOR |
+| `WIVRN_VIDEO_FEC_REPAIRS` | `8` | RS repairs per full block, integer 1–8; ignored for XOR |
+| `WIVRN_VIDEO_FEC_INTERLEAVE` | automatic | Maximum groups per window, integer 1–16 |
+| `WIVRN_VIDEO_FEC_REPAIR_DELAY_US` | `1000` | Repair delay after the window's last source send, integer 0–5000 microseconds; 500 = 0.5 ms |
 
-Invalid scheme/count/depth values are logged and fall back to their defaults.
+Invalid environment values are logged; counts, depth and delay retain their
+configured values. Invalid JSON fields individually use defaults.
 The server logs each stream's selected scheme, full-block sizes, interleave
 depth and enabled state at encoder creation. Client configuration is unnecessary.
-For stronger RS comparisons, set `WIVRN_VIDEO_FEC_REPAIRS=4` or `8`.
-The default stays at 16+2, interleave depth 4.
 
 Examples (all three variables belong to the server process environment):
 
@@ -58,13 +73,14 @@ budget remains unrecoverable, regardless of the session's average loss rate.
 ## Sending and interleaving
 
 Only already encoded data is grouped. No window crosses an encoder output
-buffer, stream or frame. The default path introduces no sleep, timer, separate
-sending thread or wait for future output. An opt-in repair-only delay is
-described below. Small per-NAL encoder callbacks can therefore
+buffer, stream or frame. Source transmission never waits for future output.
+Repairs use the configured delay described below. Small per-NAL encoder
+callbacks can therefore
 produce short blocks even when a whole frame is large.
 
 An RS window contains up to `configured_sources * configured_depth` sources,
-64 at the default 16 sources/four groups, and at most 256. The sender uses
+64 at the default eight sources/eight groups, and at most 256 with explicit
+environment overrides. The sender uses
 `ceil(N/configured_sources)` balanced consecutive source ranges, whose sizes differ
 by at most one, then emits one symbol per group in round-robin order. Each
 group's repairs follow its own sources and participate in the same schedule.
@@ -93,8 +109,8 @@ and losses crossing window boundaries have different limits; there is no
 blanket eight-packet guarantee for arbitrary frames.
 
 XOR uses balanced groups of at most eight sources and one repair per group.
-Its default four-group depth retains the previous 32-source scheduler behavior;
-explicit depths up to 16 allow up to 128 sources per window. The new wire header is
+Its depth follows the same automatic setting; explicit environment overrides
+up to 16 allow up to 128 sources per window. The new wire header is
 shared by both schemes, so XOR comparisons also require the new client.
 
 All repairs for a window are computed **before the first source is sent**:
@@ -104,12 +120,12 @@ buffer; temporary parity/source-body storage is bounded by the current window.
 Reordering delays some contiguous decoder input relative to sequential sending;
 actual latency and CPU cost still need hardware measurement.
 
-## Optional repair delay
+## Repair delay
 
 Set `WIVRN_VIDEO_FEC_REPAIR_DELAY_US=500` in the server launch environment to
 separate a window's source and repair transmissions by a target of 0.5 ms.
-The default is 0: immediate interleaving retains its previous send order and
-creates no repair worker. Invalid values are logged and fall back to 0.
+The default is 1000 (1 ms). Setting 0 selects immediate interleaving and
+creates no repair worker. Invalid environment values retain the dashboard setting.
 This option is independent of block sizes, repair counts and interleave depth;
 for an 8+8 comparison, keep SOURCES=8, REPAIRS=8 and the existing depth unchanged.
 It applies only to FEC-protected UDP video, not TCP/control or FEC-disabled data.

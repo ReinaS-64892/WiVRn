@@ -306,6 +306,7 @@ std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, 
 		dst.fps = session.default_fps();
 		dst.options = src.options;
 		dst.device = src.device;
+		dst.video_fec = config.video_fec;
 
 		std::tie(dst.encoder_name, dst.codec) = prober.select_encoder(src);
 	}
