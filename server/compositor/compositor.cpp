@@ -815,6 +815,20 @@ void compositor::update_foveation(const from_headset::foveation & packet)
 	foveation.update_foveation(packet);
 }
 
+void compositor::pause_video_repairs()
+{
+	for (auto & encoder: encoders)
+		if (encoder)
+			encoder->pause_delayed_repairs();
+}
+
+void compositor::stop_video_repairs()
+{
+	for (auto & encoder: encoders)
+		if (encoder)
+			encoder->stop_delayed_repairs();
+}
+
 void compositor::resume()
 {
 	for (auto & encoder: encoders)

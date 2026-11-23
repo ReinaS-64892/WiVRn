@@ -271,6 +271,9 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 
 wivrn_session::~wivrn_session()
 {
+	// Repair callbacks use send_stream(), including net_exception. Join them
+	// before those session members are destroyed, not just at encoder teardown.
+	compositor.stop_video_repairs();
 #if WIVRN_FEATURE_SURVIVE
 	survive_stop(survive);
 #endif
@@ -434,6 +437,7 @@ void wivrn_session::request_stop()
 
 void wivrn_session::pause_session()
 {
+	compositor.pause_video_repairs();
 	connection->stop_forwarding();
 	assert(mnd_ipc_server);
 

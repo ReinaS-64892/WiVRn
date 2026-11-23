@@ -22,6 +22,7 @@
 
 #include "video_encoder.h"
 #include "video_fec_interleave.h"
+#include "video_fec_repair_queue.h"
 
 #include "encoder_settings.h"
 #include "os/os_time.h"
@@ -207,12 +208,25 @@ std::unique_ptr<video_encoder> video_encoder::create(
 		else
 			U_LOG_W("Invalid WIVRN_VIDEO_FEC_INTERLEAVE '%s'; using %zu", value, video_fec_interleave_depth);
 	}
-	U_LOG_I("Video FEC stream %u: %s, %u sources + %u repairs per full block, interleave %u, enabled %d",
+	if (auto value = std::getenv("WIVRN_VIDEO_FEC_REPAIR_DELAY_US"))
+	{
+		const std::string_view text(value);
+		unsigned delay = 0;
+		const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), delay);
+		if (error == std::errc{} && end == text.data() + text.size() && delay <= 5000)
+			res->video_fec_repair_delay_us = delay;
+		else
+			U_LOG_W("Invalid WIVRN_VIDEO_FEC_REPAIR_DELAY_US '%s'; using 0", value);
+	}
+	if (res->video_fec && res->video_fec_repair_delay_us)
+		res->delayed_repairs = std::make_unique<video_fec_repair_queue>();
+	U_LOG_I("Video FEC stream %u: %s, %u sources + %u repairs per full block, interleave %u, repair delay %u us, enabled %d",
 	        stream_idx,
 	        res->video_fec_rs ? "Reed-Solomon" : "XOR",
 	        unsigned(res->video_fec_rs ? res->video_fec_sources : video_fec_group_size),
 	        unsigned(res->video_fec_rs ? res->video_fec_repairs : 1),
 	        unsigned(res->video_fec_interleave),
+	        res->video_fec_repair_delay_us,
 	        int(res->video_fec));
 	auto wivrn_dump_video = std::getenv("WIVRN_DUMP_VIDEO");
 	if (wivrn_dump_video)
@@ -263,6 +277,13 @@ video_encoder::~video_encoder()
 {
 	if (shared_sender)
 		shared_sender->wait_idle(this);
+	if (delayed_repairs)
+	{
+		delayed_repairs->cancel();
+		if (auto dropped = delayed_repairs->overflow_count())
+			U_LOG_W("Video FEC stream %u: dropped %llu delayed repair batches on queue overflow", stream_idx, (unsigned long long)dropped);
+		delayed_repairs.reset();
+	}
 }
 
 void video_encoder::on_feedback(const from_headset::feedback & feedback)
@@ -273,7 +294,24 @@ void video_encoder::on_feedback(const from_headset::feedback & feedback)
 
 void video_encoder::reset()
 {
+	if (delayed_repairs)
+	{
+		delayed_repairs->cancel();
+		delayed_repairs->resume();
+	}
 	idr->reset();
+}
+
+void video_encoder::pause_delayed_repairs()
+{
+	if (delayed_repairs)
+		delayed_repairs->pause();
+}
+
+void video_encoder::stop_delayed_repairs()
+{
+	if (delayed_repairs)
+		delayed_repairs->stop();
 }
 
 void video_encoder::set_bitrate(uint32_t bitrate_bps)
@@ -323,6 +361,8 @@ void video_encoder::encode(wivrn_session & cnx,
 
 	if (shared_sender)
 		shared_sender->wait_idle(this);
+	if (delayed_repairs && this->cnx != &cnx)
+		delayed_repairs->cancel();
 	this->cnx = &cnx;
 	clock = cnx.get_offset();
 
@@ -387,10 +427,10 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			// Ignore network errors, as for the original source path.
 		}
 	};
-	auto send_repair = [&](auto repair) {
+	auto send_repair = [session = cnx](auto repair) {
 		try
 		{
-			cnx->send_stream(std::move(repair));
+			session->send_stream(std::move(repair));
 		}
 		catch (...)
 		{
@@ -433,7 +473,19 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		begin = next;
 		if (protect && (window.size() == window_size || begin == end))
 		{
-			send_interleaved_video(window, send_source, send_repair, video_fec_rs ? video_fec_repairs : 0, video_fec_sources, video_fec_interleave);
+			if (delayed_repairs)
+			{
+				std::vector<to_headset::video_stream_repair_shard> repairs;
+				auto hold_repair = [&](auto repair) { repairs.push_back(std::move(repair)); };
+				send_interleaved_video(window, send_source, hold_repair, video_fec_rs ? video_fec_repairs : 0, video_fec_sources, video_fec_interleave);
+				// All original sends have returned. Coded bodies own their memory;
+				// the worker retains no encoder buffer or mutable frame metadata.
+				delayed_repairs->push({video_fec_repair_queue::clock::now() + std::chrono::microseconds(video_fec_repair_delay_us),
+				                       std::move(repairs),
+				                       send_repair});
+			}
+			else
+				send_interleaved_video(window, send_source, send_repair, video_fec_rs ? video_fec_repairs : 0, video_fec_sources, video_fec_interleave);
 			window.clear();
 		}
 	}

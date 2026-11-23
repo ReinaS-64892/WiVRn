@@ -25,6 +25,7 @@ Configure these in the **server process environment**:
 | `WIVRN_VIDEO_FEC_SOURCES` | `16` | Maximum sources per RS block, integer 1–16; ignored for XOR |
 | `WIVRN_VIDEO_FEC_REPAIRS` | `2` | RS repairs per full block, integer 1–8; ignored for XOR |
 | `WIVRN_VIDEO_FEC_INTERLEAVE` | `4` | Maximum groups per window, integer 1–16 |
+| `WIVRN_VIDEO_FEC_REPAIR_DELAY_US` | `0` | Repair delay after the window's last source send, integer 0–5000 microseconds; 500 = 0.5 ms |
 
 Invalid scheme/count/depth values are logged and fall back to their defaults.
 The server logs each stream's selected scheme, full-block sizes, interleave
@@ -57,8 +58,9 @@ budget remains unrecoverable, regardless of the session's average loss rate.
 ## Sending and interleaving
 
 Only already encoded data is grouped. No window crosses an encoder output
-buffer, stream or frame. No sleep, timer, separate sending thread or wait for
-future output is introduced. Small per-NAL encoder callbacks can therefore
+buffer, stream or frame. The default path introduces no sleep, timer, separate
+sending thread or wait for future output. An opt-in repair-only delay is
+described below. Small per-NAL encoder callbacks can therefore
 produce short blocks even when a whole frame is large.
 
 An RS window contains up to `configured_sources * configured_depth` sources,
@@ -101,6 +103,43 @@ normal transport encryption. Original source spans borrow the live encoder
 buffer; temporary parity/source-body storage is bounded by the current window.
 Reordering delays some contiguous decoder input relative to sequential sending;
 actual latency and CPU cost still need hardware measurement.
+
+## Optional repair delay
+
+Set `WIVRN_VIDEO_FEC_REPAIR_DELAY_US=500` in the server launch environment to
+separate a window's source and repair transmissions by a target of 0.5 ms.
+The default is 0: immediate interleaving retains its previous send order and
+creates no repair worker. Invalid values are logged and fall back to 0.
+This option is independent of block sizes, repair counts and interleave depth;
+for an 8+8 comparison, keep SOURCES=8, REPAIRS=8 and the existing depth unchanged.
+It applies only to FEC-protected UDP video, not TCP/control or FEC-disabled data.
+Only the server needs updating; revision-4 clients accept the same packets.
+
+With delay enabled, the sender still computes every repair before transport
+mutates source bytes, then sends all sources in the window's usual interleaved
+order. It collects repairs in their usual relative order and queues them only
+when all source sends have returned. A dedicated worker per encoder sends that
+owned batch no earlier than `steady_clock::now() + configured_delay`.
+Neither the source sender nor the opposite eye sleeps for this delay. Later
+windows/frames can send sources while earlier repairs are pending. The worker
+retains no encoder-buffer spans or mutable encoder-state references.
+
+This is a delay between server send calls, not a guarantee of spacing over the
+air or at the receiver. OS scheduling, socket queues and wireless aggregation
+can extend or change the observed gap. A missing source's earliest possible
+repair is deliberately later; whether separating a loss burst outweighs that
+latency requires an actual trial. Frame receive waiting is unchanged.
+
+The queue holds at most 64 pending batches per encoder. On overflow it discards
+the oldest pending repairs instead of blocking source transmission; encoder
+teardown reports the overflow count if nonzero. Disconnect pauses the queues and discards pending work before connection
+reset. Session teardown permanently stops the workers before its networking
+error channel is destroyed. Both wait for in-flight sends to return. Resume
+clears old pending work and re-enables the queues; stopped workers stay closed.
+The server's encoder startup log includes the selected delay in microseconds.
+Tests cover the minimum send time, encrypted variable-size source recovery,
+first/last metadata, immediate buffer reuse, earlier-deadline wakeup, bounded
+overload, send exceptions, cancellation and prompt teardown.
 
 ## Wire format and code definition
 

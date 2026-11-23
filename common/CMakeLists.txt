@@ -86,6 +86,11 @@ target_link_libraries(wivrn-common PUBLIC wivrn-forwarding Boost::pfr OpenSSL::C
 target_compile_definitions(wivrn-common PUBLIC VULKAN_HPP_NO_STRUCT_CONSTRUCTORS)
 
 if(WIVRN_BUILD_TEST)
+    add_executable(wivrn-video-fec-delay-test tests/video_fec_delay.cpp ../server/encoder/video_fec_repair_queue.cpp)
+    target_include_directories(wivrn-video-fec-delay-test PRIVATE ../server/encoder)
+    target_link_libraries(wivrn-video-fec-delay-test PRIVATE wivrn-common)
+    add_test(NAME video-fec-delay COMMAND wivrn-video-fec-delay-test)
+    set_tests_properties(video-fec-delay PROPERTIES TIMEOUT 30)
     add_executable(wivrn-video-rs-test tests/video_reed_solomon.cpp)
     target_link_libraries(wivrn-video-rs-test PRIVATE wivrn-common)
     add_test(NAME video-rs COMMAND wivrn-video-rs-test)

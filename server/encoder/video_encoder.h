@@ -39,6 +39,7 @@ namespace wivrn
 struct encoder_settings;
 struct vk_bundle;
 class wivrn_session;
+class video_fec_repair_queue;
 
 inline const char * encoder_nvenc = "nvenc";
 inline const char * encoder_vaapi = "vaapi";
@@ -97,7 +98,7 @@ private:
 	std::mutex mutex;
 
 	// temporary data
-	wivrn_session * cnx;
+	wivrn_session * cnx = nullptr;
 
 	// shard to send
 	to_headset::video_stream_data_shard shard;
@@ -110,6 +111,8 @@ private:
 	uint8_t video_fec_repairs = 2;
 	uint8_t video_fec_sources = 16;
 	uint8_t video_fec_interleave = 4;
+	uint32_t video_fec_repair_delay_us = 0;
+	std::unique_ptr<video_fec_repair_queue> delayed_repairs;
 	std::ofstream video_dump;
 
 	std::shared_ptr<sender> shared_sender;
@@ -135,6 +138,8 @@ public:
 
 	void on_feedback(const from_headset::feedback &);
 	void reset();
+	void pause_delayed_repairs();
+	void stop_delayed_repairs();
 
 	// bitrate_bps is the bitrate for the whole stream
 	// the encoder bitrate will be scaled accordingly

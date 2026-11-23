@@ -191,6 +191,8 @@ public:
 	void update_foveation(const from_headset::foveation &);
 
 	void resume();
+	void pause_video_repairs();
+	void stop_video_repairs();
 
 	void on_feedback(const from_headset::feedback &, const clock_offset &);
 };
