@@ -39,7 +39,7 @@ inline uint8_t inverse(uint8_t a)
 	return field.exp[255 - field.log[a]];
 }
 // Systematic generator [I; C], with C[r,c] = 1/(x[r]+y[c]).
-// Disjoint x=16..19 and y=0..15 make every square Cauchy submatrix
+// Disjoint x=16..23 and y=0..15 make every square Cauchy submatrix
 // invertible: any K of K+R wire symbols recover the K original packets.
 inline uint8_t coefficient(size_t repair, size_t source)
 {
@@ -156,7 +156,7 @@ inline std::vector<to_headset::video_stream_data_shard> recover_video_packets(
 				rhs[r][j] ^= video_rs::multiply(factor, bytes[j]);
 		}
 	}
-	// Gauss-Jordan inversion, at most 4x4. All missing positions are known.
+	// Gauss-Jordan inversion, at most 8x8. All missing positions are known.
 	for (size_t c = 0; c < n; ++c)
 	{
 		size_t pivot = c;

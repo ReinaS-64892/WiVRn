@@ -13,7 +13,7 @@ namespace wivrn
 {
 inline constexpr size_t video_fec_group_size = 8;
 inline constexpr size_t video_rs_group_size = 16;
-inline constexpr size_t video_rs_max_repairs = 4;
+inline constexpr size_t video_rs_max_repairs = 8;
 
 // Protect the serialized source body, including optional first/last metadata.
 // Source datagrams keep their original layout. Leave room for the larger repair

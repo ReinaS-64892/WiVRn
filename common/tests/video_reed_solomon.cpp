@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "crypto.h"
+#include "video_fec_erasure_masks.h"
 #include "video_fec_interleave.h"
 
 #include <bit>
@@ -67,7 +68,7 @@ int main()
 		require(polynomial_multiply(a, video_rs::inverse(a)) == 1);
 	size_t checked = 0;
 	for (size_t count: {1, 7, 16})
-		for (uint8_t repair_count = 1; repair_count <= 4; ++repair_count)
+		for (uint8_t repair_count = 1; repair_count <= video_rs_max_repairs; ++repair_count)
 		{
 			std::vector<std::vector<uint8_t>> storage(count);
 			std::vector<source_type> originals;
@@ -96,13 +97,10 @@ int main()
 				s = wire_roundtrip(s);
 			for (auto & repair: repairs)
 				repair = wire_roundtrip(std::move(repair));
-			// Exhaust every erasure combination of up to R data/repair symbols.
+			// Exhaust budgets up to four; sample larger data/repair erasures.
 			// Also reject R+1 lost data where enough sources exist.
-			const size_t total = count + repair_count;
-			for (unsigned mask = 0; mask < (1u << total); ++mask)
+			for (unsigned mask: video_fec_test::erasure_masks(count, repair_count, repair_count <= 4))
 			{
-				if (unsigned(std::popcount(mask)) > repair_count)
-					continue;
 				std::vector<std::optional<source_type>> available(count + 5);
 				std::vector<repair_type> surviving;
 				for (size_t i = 0; i < count; ++i)
@@ -131,6 +129,9 @@ int main()
 			invalid.front().repair_index = repair_count;
 			require(!valid_video_repair(invalid.front()));
 			invalid = repairs;
+			invalid.front().repair_count = video_rs_max_repairs + 1;
+			require(!valid_video_repair(invalid.front()));
+			invalid = repairs;
 			invalid.front().source_count = 17;
 			require(!valid_video_repair(invalid.front()));
 			if (repairs.size() > 1)
@@ -156,7 +157,7 @@ int main()
 	// Encrypted sender schedules: short buffers, group transitions, every burst
 	// position. An independent per-block erasure count determines recoverability.
 	for (size_t count: {1, 7, 16, 17, 26, 32, 33, 63, 64})
-		for (uint8_t r: {2, 4})
+		for (uint8_t r: {2, 4, 5, 6, 7, 8})
 		{
 			std::vector<std::vector<uint8_t>> storage(count, std::vector<uint8_t>(90, 51));
 			std::vector<source_type> originals;
@@ -171,7 +172,7 @@ int main()
 			std::vector<to_headset::packets> wire;
 			auto emit = [&](auto packet) { wire.emplace_back(wire_roundtrip(std::move(packet))); };
 			send_interleaved_video(originals, emit, emit, r);
-			for (size_t burst = 1; burst <= 10 && burst <= wire.size(); ++burst)
+			for (size_t burst = 1; burst <= (count == 64 ? size_t(r * 4) : 10) && burst <= wire.size(); ++burst)
 				for (size_t start = 0; start + burst <= wire.size(); ++start)
 				{
 					std::vector<std::optional<source_type>> available(count);
@@ -200,9 +201,14 @@ int main()
 							holes += !available[i];
 						auto recovered = recover_video_packets(symbols, available);
 						require(recovered.size() == (holes <= symbols.size() ? holes : 0));
-						for (const auto & packet: recovered)
+						for (auto & packet: recovered)
+						{
 							require(std::ranges::all_of(packet.payload, [](uint8_t b) { return b == 51; }));
+							available[packet.shard_idx] = std::move(packet);
+						}
 					}
+					if (count == 64)
+						require(std::ranges::all_of(available, [](const auto & packet) { return packet.has_value(); }));
 					++checked;
 				}
 		}
@@ -212,7 +218,7 @@ int main()
 	s.timing_info.emplace();
 	std::vector<uint8_t> bytes(video_fec_symbol_capacity() - serialized_size(s), 37);
 	s.payload = bytes;
-	auto repairs = encode_video_rs(std::span(&s, 1), 4);
+	auto repairs = encode_video_rs(std::span(&s, 1), 8);
 	for (const auto & repair: repairs)
 		require(serialized_size(repair) + 1 == source_type::max_payload_size);
 	std::cout << checked << " RS erasure/burst cases, GF oracle, metadata, encryption and wire bounds passed\n";

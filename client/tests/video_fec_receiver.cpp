@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "decoder/shard_accumulator.h"
 #include "scenes/stream.h"
+#include "tests/video_fec_erasure_masks.h"
 #include "video_fec_interleave.h"
 #include "xr/instance.h"
 
@@ -319,19 +320,17 @@ int main()
 		}
 	}
 	require(found_partial_capture);
-	// Real accumulator/decoder integration: every data/repair erasure pattern
-	// within the RS budget, including first/last metadata, arbitrary parity IDs,
+	// Real accumulator/decoder integration: exhaustive budgets up to four and
+	// sampled larger budgets, including first/last metadata, arbitrary parity IDs,
 	// repair-first arrival, duplicates and conflicting block metadata.
-	for (uint8_t r: {2, 4})
+	for (uint8_t r: {2, 4, 5, 6, 7, 8})
 	{
 		std::vector<wivrn::to_headset::video_stream_data_shard> originals;
 		for (uint16_t i = 0; i < 16; ++i)
 			originals.push_back(source(800, i, 16));
 		auto repairs = wivrn::encode_video_rs(originals, r);
-		for (unsigned mask = 0; mask < (1u << (16 + r)); ++mask)
+		for (unsigned mask: video_fec_test::erasure_masks(16, r, r <= 4))
 		{
-			if (unsigned(std::popcount(mask)) > r)
-				continue;
 			for (bool repair_first: {false, true})
 			{
 				recording = std::make_shared<recording_decoder>();
@@ -365,26 +364,26 @@ int main()
 	}
 	// Distinguish a code-capacity failure from missing repair packets in logs.
 	require(recorder.start(std::filesystem::temp_directory_path() / ("wivrn-fec-receiver-" + std::to_string(getpid()))));
-	for (bool over_capacity: {false, true})
-	{
-		recording = std::make_shared<recording_decoder>();
-		wivrn::shard_accumulator rs_receiver(device, physical, instance, 0, description, {}, 0);
-		std::vector<wivrn::to_headset::video_stream_data_shard> originals;
-		for (uint16_t i = 0; i < 16; ++i)
-			originals.push_back(source(900, i, 16));
-		auto repairs = wivrn::encode_video_rs(originals, 2);
-		auto late_repair = repairs[1];
-		for (int i = over_capacity ? 3 : 2; i < 16; ++i)
-			rs_receiver.push_shard(source(900, i, 16));
-		rs_receiver.push_repair(std::move(repairs[1]));
-		if (over_capacity)
-			rs_receiver.push_repair(std::move(repairs[0]));
-		require(recording->completed.empty());
-		for (uint16_t i = 0; i < 16; ++i)
-			rs_receiver.push_shard(source(901, i, 16));
-		require(rs_receiver.take_statistics().incomplete_frames == 1);
-		rs_receiver.push_repair(std::move(late_repair));
-	}
+	for (uint8_t r: {2, 8})
+		for (bool over_capacity: {false, true})
+		{
+			recording = std::make_shared<recording_decoder>();
+			wivrn::shard_accumulator rs_receiver(device, physical, instance, 0, description, {}, 0);
+			std::vector<wivrn::to_headset::video_stream_data_shard> originals;
+			for (uint16_t i = 0; i < 16; ++i)
+				originals.push_back(source(900, i, 16));
+			auto repairs = wivrn::encode_video_rs(originals, r);
+			auto late_repair = repairs[r - 1];
+			for (int i = over_capacity ? r + 1 : r; i < 16; ++i)
+				rs_receiver.push_shard(source(900, i, 16));
+			for (int i = r - 1; i >= (over_capacity ? 0 : 1); --i)
+				rs_receiver.push_repair(std::move(repairs[i]));
+			require(recording->completed.empty());
+			for (uint16_t i = 0; i < 16; ++i)
+				rs_receiver.push_shard(source(901, i, 16));
+			require(rs_receiver.take_statistics().incomplete_frames == 1);
+			rs_receiver.push_repair(std::move(late_repair));
+		}
 	recorder.stop();
 	std::ifstream rs_log(recorder.snapshot().path);
 	size_t capacity_failures = 0, repair_failures = 0, rs_late = 0;
@@ -394,21 +393,24 @@ int main()
 		if (json["kind"].get_string().value() == "late")
 		{
 			require(json["scheme"].get_uint64().value() == 1);
-			require(json["repair_index"].get_uint64().value() == 1);
-			require(json["repair_count"].get_uint64().value() == 2);
+			const auto count = json["repair_count"].get_uint64().value();
+			require(count == 2 || count == 8);
+			require(json["repair_index"].get_uint64().value() == count - 1);
 			++rs_late;
 			continue;
 		}
 		if (json["kind"].get_string().value() != "frame" || json["complete"].get_bool().value())
 			continue;
-		require(json["rs_blocks_by_repairs"].get_array().value().at(1).get_uint64().value() == 1);
+		require(json["rs_blocks_by_repairs"].get_array().value().size() == 8);
 		capacity_failures += json["over_capacity_groups"].get_uint64().value();
 		repair_failures += json["insufficient_repair_groups"].get_uint64().value();
 		require(json["recoverable_unrecovered_groups"].get_uint64().value() == 0);
 		auto group = json["damaged_groups"].get_array().value().at(0);
 		require(group["scheme"].get_uint64().value() == 1);
-		require(group["repair_count"].get_uint64().value() == 2);
+		const auto count = group["repair_count"].get_uint64().value();
+		require(count == 2 || count == 8);
+		require(json["rs_blocks_by_repairs"].get_array().value().at(count - 1).get_uint64().value() == 1);
 	}
-	require(capacity_failures == 1 && repair_failures == 1 && rs_late == 2);
+	require(capacity_failures == 2 && repair_failures == 2 && rs_late == 4);
 	std::cout << "First/middle/final recovery, reordered/duplicate repairs, two-frame buffering and original discard policy passed\n";
 }

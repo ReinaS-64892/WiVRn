@@ -41,7 +41,7 @@
 namespace wivrn
 {
 
-static constexpr int protocol_revision = 3;
+static constexpr int protocol_revision = 4;
 
 enum class device_id : uint8_t
 {

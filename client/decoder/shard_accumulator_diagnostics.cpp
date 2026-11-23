@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "shard_accumulator.h"
+#include "video_fec.h"
 #include <algorithm>
 #include <bit>
 #include <spdlog/fmt/fmt.h>
@@ -45,7 +46,7 @@ void shard_accumulator::record_retirement(const shard_set & shards, bool complet
 	const auto & d = shards.diagnostics;
 	const bool partial_capture = d.generation != generation || d.partial_capture;
 	size_t expected = shards.data.size(), present = 0, xor_blocks = 0;
-	std::array<size_t, 4> rs_blocks_by_repairs{};
+	std::array<size_t, video_rs_max_repairs> rs_blocks_by_repairs{};
 	for (const auto & [first, symbols]: shards.repairs)
 	{
 		const auto & repair = symbols.front();
@@ -108,7 +109,7 @@ void shard_accumulator::record_retirement(const shard_set & shards, bool complet
 	}
 	missing += ']';
 	groups += ']';
-	recorder.record(generation, fmt::format("{{\"kind\":\"frame\",\"mono_ns\":{},\"receiver\":{},\"stream\":{},\"frame\":{},\"complete\":{},\"reason\":\"{}\",\"partial_capture\":{},\"sources_rx\":{},\"repairs_rx\":{},\"duplicate_sources\":{},\"reordered_sources\":{},\"payload_bytes\":{},\"recovered\":{},\"present\":{},\"expected_min\":{},\"end_known\":{},\"missing_min\":{},\"missing_without_repair\":{},\"multiple_missing_groups\":{},\"unrecovered_single_groups\":{},\"repair_groups\":{},\"xor_blocks\":{},\"rs_blocks_by_repairs\":[{},{},{},{}],\"over_capacity_groups\":{},\"insufficient_repair_groups\":{},\"recoverable_unrecovered_groups\":{},\"missing\":{},\"damaged_groups\":{},\"lists_truncated\":{},\"first_ns\":{},\"last_ns\":{},\"max_gap_ns\":{},\"receive_span_ns\":{},\"age_ns\":{}}}", now, diagnostics_id, shards.feedback.stream_index, shards.frame_index(), complete, reason, partial_capture, d.generation == generation ? d.sources : 0, d.generation == generation ? d.repairs : 0, d.generation == generation ? d.duplicate_sources : 0, d.generation == generation ? d.reordered_sources : 0, d.generation == generation ? d.payload_bytes : 0, shards.recovered_packets, present, expected, end_known, expected - present, without_repair, multiple_groups, single_groups, shards.repairs.size(), xor_blocks, rs_blocks_by_repairs[0], rs_blocks_by_repairs[1], rs_blocks_by_repairs[2], rs_blocks_by_repairs[3], over_capacity, insufficient_repairs, recoverable_unrecovered, missing, groups, missing_listed < expected - present || groups_listed < multiple_groups + single_groups, d.generation == generation ? d.first_ns : 0, d.generation == generation ? d.last_ns : 0, d.generation == generation ? d.max_gap_ns : 0, d.generation == generation ? d.last_ns - d.first_ns : 0, d.generation == generation ? now - d.first_ns : 0));
+	recorder.record(generation, fmt::format("{{\"kind\":\"frame\",\"mono_ns\":{},\"receiver\":{},\"stream\":{},\"frame\":{},\"complete\":{},\"reason\":\"{}\",\"partial_capture\":{},\"sources_rx\":{},\"repairs_rx\":{},\"duplicate_sources\":{},\"reordered_sources\":{},\"payload_bytes\":{},\"recovered\":{},\"present\":{},\"expected_min\":{},\"end_known\":{},\"missing_min\":{},\"missing_without_repair\":{},\"multiple_missing_groups\":{},\"unrecovered_single_groups\":{},\"repair_groups\":{},\"xor_blocks\":{},\"rs_blocks_by_repairs\":[{},{},{},{},{},{},{},{}],\"over_capacity_groups\":{},\"insufficient_repair_groups\":{},\"recoverable_unrecovered_groups\":{},\"missing\":{},\"damaged_groups\":{},\"lists_truncated\":{},\"first_ns\":{},\"last_ns\":{},\"max_gap_ns\":{},\"receive_span_ns\":{},\"age_ns\":{}}}", now, diagnostics_id, shards.feedback.stream_index, shards.frame_index(), complete, reason, partial_capture, d.generation == generation ? d.sources : 0, d.generation == generation ? d.repairs : 0, d.generation == generation ? d.duplicate_sources : 0, d.generation == generation ? d.reordered_sources : 0, d.generation == generation ? d.payload_bytes : 0, shards.recovered_packets, present, expected, end_known, expected - present, without_repair, multiple_groups, single_groups, shards.repairs.size(), xor_blocks, rs_blocks_by_repairs[0], rs_blocks_by_repairs[1], rs_blocks_by_repairs[2], rs_blocks_by_repairs[3], rs_blocks_by_repairs[4], rs_blocks_by_repairs[5], rs_blocks_by_repairs[6], rs_blocks_by_repairs[7], over_capacity, insufficient_repairs, recoverable_unrecovered, missing, groups, missing_listed < expected - present || groups_listed < multiple_groups + single_groups, d.generation == generation ? d.first_ns : 0, d.generation == generation ? d.last_ns : 0, d.generation == generation ? d.max_gap_ns : 0, d.generation == generation ? d.last_ns - d.first_ns : 0, d.generation == generation ? now - d.first_ns : 0));
 	if (!complete || shards.recovered_packets)
 	{
 		recently_damaged.push_back({shards.frame_index(), generation, now, complete});
