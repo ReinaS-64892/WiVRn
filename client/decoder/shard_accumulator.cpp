@@ -38,7 +38,6 @@ shard_set::shard_set(uint8_t stream_index)
 
 void shard_set::reset(uint64_t frame_index)
 {
-	diagnostics = {};
 	recovered_packets = 0;
 	repairs.clear();
 	data.clear();
@@ -189,8 +188,8 @@ shard_set * shard_accumulator::select_frame(uint64_t frame)
 	}
 	else if (difference > 2)
 	{
-		send_feedback(current, false, "frame_jump");
-		send_feedback(next, false, "frame_jump");
+		send_feedback(current);
+		send_feedback(next);
 		current.reset(frame);
 		next.reset(frame + 1);
 	}
@@ -204,7 +203,7 @@ void shard_accumulator::inserted(shard_set & target, std::optional<uint16_t> ind
 	else if (is_complete(next))
 	{
 		debug_why_not_sent(current);
-		send_feedback(current, false, "next_complete");
+		send_feedback(current);
 		advance();
 		try_submit_frame(0);
 	}
@@ -218,11 +217,8 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 	}
 	if (auto target = select_frame(shard.frame_idx))
 	{
-		observe_packet(*target, false, shard.shard_idx, shard.payload.size());
 		inserted(*target, target->insert(std::move(shard), instance));
 	}
-	else
-		record_late(shard.frame_idx, false, shard.shard_idx, 0);
 }
 
 void shard_accumulator::push_repair(video_stream_repair_shard && repair)
@@ -233,15 +229,12 @@ void shard_accumulator::push_repair(video_stream_repair_shard && repair)
 		std::lock_guard lock(statistics_mutex);
 		++pending_statistics.repair_packets;
 	}
-	// Healthy frames often complete before their trailing repairs arrive. Keep
-	// explicit diagnostic recording, but avoid an info log for every such packet.
+	// Healthy frames often complete before their trailing repairs arrive. Avoid
+	// an info log for every such packet.
 	if (auto target = repair.frame_idx < current.frame_index() ? nullptr : select_frame(repair.frame_idx))
 	{
-		observe_packet(*target, true, repair.first_shard, repair.payload.size());
 		inserted(*target, target->insert(std::move(repair), instance));
 	}
-	else
-		record_late(repair.frame_idx, true, repair.first_shard, repair.source_count, repair.scheme, repair.repair_index, repair.repair_count);
 }
 
 void shard_accumulator::try_submit_frame(std::optional<uint16_t> shard_idx)
@@ -293,7 +286,7 @@ void shard_accumulator::try_submit_frame(uint16_t shard_idx)
 	// Try to extract a frame
 	decoder_->frame_completed(current.feedback, *data_shards.front()->view_info);
 
-	send_feedback(current, true, "complete");
+	send_feedback(current, true);
 
 	advance();
 }
@@ -304,12 +297,11 @@ shard_accumulator::statistics shard_accumulator::take_statistics()
 	return std::exchange(pending_statistics, {});
 }
 
-void shard_accumulator::send_feedback(shard_set & shards, bool completed, const char * reason)
+void shard_accumulator::send_feedback(shard_set & shards, bool completed)
 {
 	// Empty placeholders and wholly unseen frames have no measurable outcome.
 	if (!shards.empty())
 	{
-		record_retirement(shards, completed, reason);
 		std::lock_guard lock(statistics_mutex);
 		pending_statistics.recovered_packets += shards.recovered_packets;
 		pending_statistics.completed_frames += completed;

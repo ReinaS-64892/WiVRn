@@ -6,13 +6,10 @@
 #include "xr/instance.h"
 
 #include <bit>
-#include <fstream>
 #include <iostream>
 #include <numeric>
-#include <simdjson.h>
 #include <source_location>
 #include <stdexcept>
-#include <unistd.h>
 
 namespace
 {
@@ -94,8 +91,6 @@ void scenes::stream::send_feedback(const wivrn::from_headset::feedback &) {}
 
 int main()
 {
-	auto & recorder = wivrn::video_fec_diagnostics::get();
-	require(recorder.start(std::filesystem::temp_directory_path() / ("wivrn-fec-receiver-" + std::to_string(getpid()))));
 	vk::raii::Device device(nullptr);
 	vk::raii::PhysicalDevice physical(nullptr);
 	xr::instance instance;
@@ -235,8 +230,8 @@ int main()
 	invalid.source_count = 0;
 	partial.push_repair(std::move(invalid));
 	require(partial.take_statistics().repair_packets == 0);
-	// A syntactically valid repair with inconsistent source length must remain
-	// distinguishable from two losses in a group.
+	// A syntactically valid repair with inconsistent source length cannot
+	// rescue the frame or prevent subsequent valid frames from completing.
 	recording = std::make_shared<recording_decoder>();
 	wivrn::shard_accumulator mismatch(device, physical, instance, 0, description, {}, 0);
 	for (int i: {0, 1, 3, 4, 5})
@@ -250,77 +245,10 @@ int main()
 	mismatch.push_shard(source(600, 0));
 	for (int i = 0; i < 6; ++i)
 		mismatch.push_shard(source(601, i));
-	recorder.stop();
-	require(recorder.snapshot().error.empty() && !recorder.snapshot().lost_events);
-	std::ifstream log(recorder.snapshot().path);
-	std::string line;
-	simdjson::dom::parser parser;
-	size_t rescued = 0, incomplete = 0, late_sources = 0, late_repairs = 0;
-	while (std::getline(log, line))
-	{
-		auto json = parser.parse(line);
-		auto kind = json["kind"].get_string().value();
-		if (kind == "frame")
-		{
-			if (json["complete"].get_bool().value())
-				rescued += json["recovered"].get_uint64().value() > 0;
-			else
-			{
-				++incomplete;
-				if (json["frame"].get_uint64().value() == 500)
-				{
-					require(json["missing_min"].get_uint64().value() == 1);
-					require(json["unrecovered_single_groups"].get_uint64().value() == 1);
-					continue;
-				}
-				if (json["frame"].get_uint64().value() == 600)
-				{
-					require(!json["end_known"].get_bool().value());
-					require(json["missing_min"].get_uint64().value() == 0);
-					continue;
-				}
-				require(json["missing_min"].get_uint64().value() == 2);
-				if (json["repair_groups"].get_uint64().value())
-				{
-					require(json["multiple_missing_groups"].get_uint64().value() == 1);
-					require(json["missing_without_repair"].get_uint64().value() == 0);
-				}
-				else
-					require(json["missing_without_repair"].get_uint64().value() == 2);
-			}
-		}
-		else if (kind == "late")
-		{
-			if (json["complete_at_retire"].get_bool().value())
-				continue;
-			if (json["repair"].get_bool().value())
-				++late_repairs;
-			else
-				++late_sources;
-		}
-	}
-	require(rescued > 12 && incomplete == 5 && late_sources == 2 && late_repairs == 2);
-	// Starting in the middle of a frame must flag incomplete capture rather
-	// than presenting its receive counters as a complete observation.
-	mismatch.push_shard(source(700, 0));
-	require(recorder.start(std::filesystem::temp_directory_path() / ("wivrn-fec-receiver-" + std::to_string(getpid()))));
-	for (int i = 1; i < 6; ++i)
-		mismatch.push_shard(source(700, i));
-	recorder.stop();
-	std::ifstream mid_frame(recorder.snapshot().path);
-	bool found_partial_capture = false;
-	while (std::getline(mid_frame, line))
-	{
-		auto json = parser.parse(line);
-		if (json["kind"].get_string().value() == "frame")
-		{
-			require(json["partial_capture"].get_bool().value());
-			require(json["sources_rx"].get_uint64().value() == 5);
-			require(json["present"].get_uint64().value() == 6);
-			found_partial_capture = true;
-		}
-	}
-	require(found_partial_capture);
+	require(recording->completed.size() == 2);
+	stats = mismatch.take_statistics();
+	require(stats.completed_frames == 2 && stats.incomplete_frames == 2);
+	require(stats.recovered_packets == 0 && stats.rescued_frames == 0);
 	// Real accumulator/decoder integration: exhaustive budgets up to four and
 	// sampled larger budgets, including first/last metadata, arbitrary parity IDs,
 	// repair-first arrival, duplicates and conflicting block metadata.
@@ -400,8 +328,8 @@ int main()
 				require(rs_receiver.take_statistics().incomplete_frames == 0);
 			}
 	}
-	// Distinguish a code-capacity failure from missing repair packets in logs.
-	require(recorder.start(std::filesystem::temp_directory_path() / ("wivrn-fec-receiver-" + std::to_string(getpid()))));
+	// Excess source losses and insufficient repairs must both retire incomplete
+	// frames, and late repairs must not resubmit those frames.
 	for (uint8_t r: {2, 8})
 		for (bool over_capacity: {false, true})
 		{
@@ -421,34 +349,7 @@ int main()
 				rs_receiver.push_shard(source(901, i, 16));
 			require(rs_receiver.take_statistics().incomplete_frames == 1);
 			rs_receiver.push_repair(std::move(late_repair));
+			require(recording->completed.size() == 1 && rs_receiver.take_statistics().completed_frames == 0);
 		}
-	recorder.stop();
-	std::ifstream rs_log(recorder.snapshot().path);
-	size_t capacity_failures = 0, repair_failures = 0, rs_late = 0;
-	while (std::getline(rs_log, line))
-	{
-		auto json = parser.parse(line);
-		if (json["kind"].get_string().value() == "late")
-		{
-			require(json["scheme"].get_uint64().value() == 1);
-			const auto count = json["repair_count"].get_uint64().value();
-			require(count == 2 || count == 8);
-			require(json["repair_index"].get_uint64().value() == count - 1);
-			++rs_late;
-			continue;
-		}
-		if (json["kind"].get_string().value() != "frame" || json["complete"].get_bool().value())
-			continue;
-		require(json["rs_blocks_by_repairs"].get_array().value().size() == 8);
-		capacity_failures += json["over_capacity_groups"].get_uint64().value();
-		repair_failures += json["insufficient_repair_groups"].get_uint64().value();
-		require(json["recoverable_unrecovered_groups"].get_uint64().value() == 0);
-		auto group = json["damaged_groups"].get_array().value().at(0);
-		require(group["scheme"].get_uint64().value() == 1);
-		const auto count = group["repair_count"].get_uint64().value();
-		require(count == 2 || count == 8);
-		require(json["rs_blocks_by_repairs"].get_array().value().at(count - 1).get_uint64().value() == 1);
-	}
-	require(capacity_failures == 2 && repair_failures == 2 && rs_late == 4);
 	std::cout << "First/middle/final recovery, reordered/duplicate repairs, two-frame buffering and original discard policy passed\n";
 }
