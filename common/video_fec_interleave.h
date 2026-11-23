@@ -6,22 +6,27 @@
 namespace wivrn
 {
 inline constexpr size_t video_fec_interleave_depth = 4;
+inline constexpr size_t video_fec_max_interleave_depth = 16;
 inline constexpr size_t video_fec_interleave_window = video_fec_group_size * video_fec_interleave_depth;
 
 // Reorder only already encoded data, without crossing a buffer, stream or frame.
-// rs_repairs=0 selects XOR; otherwise it is the repair count per 16 sources.
+// rs_repairs=0 selects XOR; otherwise it is the repair count per rs_sources.
 template <typename SendSource, typename SendRepair>
 void send_interleaved_video(std::span<const to_headset::video_stream_data_shard> sources,
                             SendSource && send_source,
                             SendRepair && send_repair,
-                            uint8_t rs_repairs = 0)
+                            uint8_t rs_repairs = 0,
+                            uint8_t rs_sources = video_rs_group_size,
+                            uint8_t max_groups = video_fec_interleave_depth)
 {
 	if (sources.empty())
 		return;
-	if (rs_repairs > video_rs_max_repairs)
-		throw std::runtime_error("Invalid video RS repair count");
-	const auto group_size = rs_repairs ? video_rs_group_size : video_fec_group_size;
-	if (sources.size() > group_size * video_fec_interleave_depth)
+	if (rs_repairs > video_rs_max_repairs || (rs_repairs && (!rs_sources || rs_sources > video_rs_group_size)))
+		throw std::runtime_error("Invalid video RS block configuration");
+	if (!max_groups || max_groups > video_fec_max_interleave_depth)
+		throw std::runtime_error("Invalid video FEC interleave depth");
+	const auto group_size = rs_repairs ? size_t(rs_sources) : video_fec_group_size;
+	if (sources.size() > group_size * max_groups)
 		throw std::runtime_error("Video FEC interleave window too large");
 	for (size_t i = 0; i < sources.size(); ++i)
 		if (sources[i].frame_idx != sources[0].frame_idx || sources[i].stream_item_idx != sources[0].stream_item_idx ||
@@ -31,8 +36,8 @@ void send_interleaved_video(std::span<const to_headset::video_stream_data_shard>
 	// Balance short windows and round up their proportional repair count.
 	// Include repairs in the round-robin schedule to separate tail symbols.
 	const size_t groups = (sources.size() + group_size - 1) / group_size;
-	std::array<size_t, video_fec_interleave_depth> offsets{}, counts{};
-	std::array<std::vector<to_headset::video_stream_repair_shard>, video_fec_interleave_depth> repairs{};
+	std::array<size_t, video_fec_max_interleave_depth> offsets{}, counts{};
+	std::array<std::vector<to_headset::video_stream_repair_shard>, video_fec_max_interleave_depth> repairs{};
 	size_t offset = 0;
 	for (size_t group = 0; group < groups; ++group)
 	{
@@ -40,7 +45,7 @@ void send_interleaved_video(std::span<const to_headset::video_stream_data_shard>
 		counts[group] = sources.size() / groups + (group < sources.size() % groups);
 		if (rs_repairs)
 		{
-			const auto count = (counts[group] * rs_repairs + video_rs_group_size - 1) / video_rs_group_size;
+			const auto count = (counts[group] * rs_repairs + group_size - 1) / group_size;
 			repairs[group] = encode_video_rs(sources.subspan(offset, counts[group]), count);
 		}
 		else

@@ -156,62 +156,117 @@ int main()
 		}
 	// Encrypted sender schedules: short buffers, group transitions, every burst
 	// position. An independent per-block erasure count determines recoverability.
+	auto check_schedule = [&](size_t count, uint8_t k, uint8_t r, uint8_t depth) {
+		std::vector<std::vector<uint8_t>> storage(count, std::vector<uint8_t>(90, 51));
+		std::vector<source_type> originals;
+		for (size_t i = 0; i < count; ++i)
+		{
+			source_type s{};
+			s.frame_idx = 111;
+			s.shard_idx = i;
+			s.payload = storage[i];
+			originals.push_back(s);
+		}
+		std::vector<to_headset::packets> wire;
+		auto emit = [&](auto packet) { wire.emplace_back(wire_roundtrip(std::move(packet))); };
+		send_interleaved_video(originals, emit, emit, r, k, depth);
+		const size_t window = size_t(k) * depth;
+		const size_t groups = (count + k - 1) / k;
+		size_t repairs_sent = 0;
+		for (const auto & packet: wire)
+			if (auto repair = std::get_if<repair_type>(&packet))
+			{
+				require(repair->source_count <= k);
+				require(repair->repair_count == (size_t(repair->source_count) * r + k - 1) / k);
+				++repairs_sent;
+			}
+		size_t expected_repairs = 0;
+		for (size_t group = 0; group < groups; ++group)
+		{
+			const size_t length = count / groups + (group < count % groups);
+			expected_repairs += (length * r + k - 1) / k;
+		}
+		require(repairs_sent == expected_repairs && wire.size() == count + expected_repairs);
+		std::vector<size_t> bursts;
+		if (count == window && window > 128)
+			bursts = {1, size_t(r), size_t(r) * depth};
+		else
+			for (size_t burst = 1; burst <= (count == window ? size_t(r) * depth : 10) && burst <= wire.size(); ++burst)
+				bursts.push_back(burst);
+		for (size_t burst: bursts)
+			for (size_t start = 0; start + burst <= wire.size(); ++start)
+			{
+				std::vector<std::optional<source_type>> available(count);
+				std::map<uint16_t, std::vector<repair_type>> blocks;
+				for (size_t i = 0; i < wire.size(); ++i)
+					if (auto repair = std::get_if<repair_type>(&wire[i]))
+						blocks.try_emplace(repair->first_shard);
+				for (size_t i = 0; i < wire.size(); ++i)
+				{
+					if (i >= start && i < start + burst)
+						continue;
+					if (auto s = std::get_if<source_type>(&wire[i]))
+						available[s->shard_idx] = *s;
+					else
+					{
+						const auto & repair = std::get<repair_type>(wire[i]);
+						blocks[repair.first_shard].push_back(repair);
+					}
+				}
+				for (const auto & [first, symbols]: blocks)
+				{
+					if (symbols.empty())
+						continue;
+					size_t holes = 0;
+					for (size_t i = first; i < size_t(first) + symbols.front().source_count; ++i)
+						holes += !available[i];
+					auto recovered = recover_video_packets(symbols, available);
+					require(recovered.size() == (holes <= symbols.size() ? holes : 0));
+					for (auto & packet: recovered)
+					{
+						require(std::ranges::all_of(packet.payload, [](uint8_t b) { return b == 51; }));
+						available[packet.shard_idx] = std::move(packet);
+					}
+				}
+				if (count == window)
+					require(std::ranges::all_of(available, [](const auto & packet) { return packet.has_value(); }));
+				++checked;
+			}
+	};
 	for (size_t count: {1, 7, 16, 17, 26, 32, 33, 63, 64})
 		for (uint8_t r: {2, 4, 5, 6, 7, 8})
+			check_schedule(count, 16, r, 4);
+	struct configuration
+	{
+		uint8_t sources, repairs, depth;
+	};
+	for (auto config: {configuration{4, 2, 16}, {8, 2, 8}, {8, 4, 8}, {16, 8, 16}})
+	{
+		const size_t window = size_t(config.sources) * config.depth;
+		for (size_t count: {size_t(1), size_t(config.sources - 1), size_t(config.sources), size_t(config.sources + 1), size_t(27), window - 1, window})
+			check_schedule(count, config.sources, config.repairs, config.depth);
+	}
+	// Configuration/range errors must reject the whole window before a send.
+	{
+		std::vector<source_type> sources(257);
+		for (size_t i = 0; i < sources.size(); ++i)
+			sources[i].shard_idx = i;
+		size_t sends = 0;
+		auto emit = [&](const auto &) { ++sends; };
+		for (auto config: {configuration{0, 2, 4}, {17, 2, 4}, {4, 2, 0}, {4, 2, 17}, {16, 8, 16}})
 		{
-			std::vector<std::vector<uint8_t>> storage(count, std::vector<uint8_t>(90, 51));
-			std::vector<source_type> originals;
-			for (size_t i = 0; i < count; ++i)
+			bool rejected = false;
+			try
 			{
-				source_type s{};
-				s.frame_idx = 111;
-				s.shard_idx = i;
-				s.payload = storage[i];
-				originals.push_back(s);
+				send_interleaved_video(std::span(sources).first(config.sources == 16 ? 257 : 1), emit, emit, config.repairs, config.sources, config.depth);
 			}
-			std::vector<to_headset::packets> wire;
-			auto emit = [&](auto packet) { wire.emplace_back(wire_roundtrip(std::move(packet))); };
-			send_interleaved_video(originals, emit, emit, r);
-			for (size_t burst = 1; burst <= (count == 64 ? size_t(r * 4) : 10) && burst <= wire.size(); ++burst)
-				for (size_t start = 0; start + burst <= wire.size(); ++start)
-				{
-					std::vector<std::optional<source_type>> available(count);
-					std::map<uint16_t, std::vector<repair_type>> blocks;
-					for (size_t i = 0; i < wire.size(); ++i)
-						if (auto repair = std::get_if<repair_type>(&wire[i]))
-							blocks.try_emplace(repair->first_shard);
-					for (size_t i = 0; i < wire.size(); ++i)
-					{
-						if (i >= start && i < start + burst)
-							continue;
-						if (auto s = std::get_if<source_type>(&wire[i]))
-							available[s->shard_idx] = *s;
-						else
-						{
-							const auto & repair = std::get<repair_type>(wire[i]);
-							blocks[repair.first_shard].push_back(repair);
-						}
-					}
-					for (const auto & [first, symbols]: blocks)
-					{
-						if (symbols.empty())
-							continue;
-						size_t holes = 0;
-						for (size_t i = first; i < size_t(first) + symbols.front().source_count; ++i)
-							holes += !available[i];
-						auto recovered = recover_video_packets(symbols, available);
-						require(recovered.size() == (holes <= symbols.size() ? holes : 0));
-						for (auto & packet: recovered)
-						{
-							require(std::ranges::all_of(packet.payload, [](uint8_t b) { return b == 51; }));
-							available[packet.shard_idx] = std::move(packet);
-						}
-					}
-					if (count == 64)
-						require(std::ranges::all_of(available, [](const auto & packet) { return packet.has_value(); }));
-					++checked;
-				}
+			catch (const std::runtime_error &)
+			{
+				rejected = true;
+			}
+			require(rejected && !sends);
 		}
+	}
 	// Maximal body with both metadata fields must fit the repair datagram.
 	source_type s{};
 	s.view_info.emplace();

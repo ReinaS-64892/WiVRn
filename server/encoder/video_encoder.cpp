@@ -177,6 +177,16 @@ std::unique_ptr<video_encoder> video_encoder::create(
 		else
 			U_LOG_W("Invalid WIVRN_VIDEO_FEC_SCHEME '%s'; using rs", value);
 	}
+	if (auto value = std::getenv("WIVRN_VIDEO_FEC_SOURCES"))
+	{
+		const std::string_view text(value);
+		unsigned count = 0;
+		const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), count);
+		if (error == std::errc{} && end == text.data() + text.size() && count >= 1 && count <= video_rs_group_size)
+			res->video_fec_sources = count;
+		else
+			U_LOG_W("Invalid WIVRN_VIDEO_FEC_SOURCES '%s'; using 16", value);
+	}
 	if (auto value = std::getenv("WIVRN_VIDEO_FEC_REPAIRS"))
 	{
 		const std::string_view text(value);
@@ -192,7 +202,7 @@ std::unique_ptr<video_encoder> video_encoder::create(
 		const std::string_view text(value);
 		unsigned depth = 0;
 		const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), depth);
-		if (error == std::errc{} && end == text.data() + text.size() && depth >= 1 && depth <= video_fec_interleave_depth)
+		if (error == std::errc{} && end == text.data() + text.size() && depth >= 1 && depth <= video_fec_max_interleave_depth)
 			res->video_fec_interleave = depth;
 		else
 			U_LOG_W("Invalid WIVRN_VIDEO_FEC_INTERLEAVE '%s'; using %zu", value, video_fec_interleave_depth);
@@ -200,7 +210,7 @@ std::unique_ptr<video_encoder> video_encoder::create(
 	U_LOG_I("Video FEC stream %u: %s, %u sources + %u repairs per full block, interleave %u, enabled %d",
 	        stream_idx,
 	        res->video_fec_rs ? "Reed-Solomon" : "XOR",
-	        unsigned(res->video_fec_rs ? video_rs_group_size : video_fec_group_size),
+	        unsigned(res->video_fec_rs ? res->video_fec_sources : video_fec_group_size),
 	        unsigned(res->video_fec_rs ? res->video_fec_repairs : 1),
 	        unsigned(res->video_fec_interleave),
 	        int(res->video_fec));
@@ -361,7 +371,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 	const bool udp = cnx->has_stream() && !control;
 	const bool protect = udp && video_fec;
 	std::vector<to_headset::video_stream_data_shard> window;
-	const size_t window_size = video_fec_interleave * (video_fec_rs ? video_rs_group_size : video_fec_group_size);
+	const size_t window_size = video_fec_interleave * (video_fec_rs ? video_fec_sources : video_fec_group_size);
 	if (protect)
 		window.reserve(window_size);
 	auto send_source = [&](const auto & source) {
@@ -423,7 +433,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		begin = next;
 		if (protect && (window.size() == window_size || begin == end))
 		{
-			send_interleaved_video(window, send_source, send_repair, video_fec_rs ? video_fec_repairs : 0);
+			send_interleaved_video(window, send_source, send_repair, video_fec_rs ? video_fec_repairs : 0, video_fec_sources, video_fec_interleave);
 			window.clear();
 		}
 	}

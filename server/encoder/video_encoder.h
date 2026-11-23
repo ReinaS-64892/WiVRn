@@ -108,6 +108,7 @@ private:
 	bool video_fec = true;
 	bool video_fec_rs = true;
 	uint8_t video_fec_repairs = 2;
+	uint8_t video_fec_sources = 16;
 	uint8_t video_fec_interleave = 4;
 	std::ofstream video_dump;
 

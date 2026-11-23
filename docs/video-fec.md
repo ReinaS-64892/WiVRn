@@ -10,7 +10,8 @@ comparisons. No cross-eye buffering or coalescing is used.
 
 The sender uses a systematic Cauchy Reed-Solomon erasure code over GF(256).
 Original video packets are sent unchanged in format; repairs are separate
-packets. A full block contains 16 sources and, by default, two repair packets.
+packets. Source block size and repair count are independently configurable.
+By default, a full block contains 16 sources and two repair packets.
 Any 16 of those 18 packets suffice to recover all sources. Thus two lost sources,
 or one lost source plus one lost repair, are recoverable. Receiving all sources
 submits the frame immediately without waiting for repairs.
@@ -21,19 +22,34 @@ Configure these in the **server process environment**:
 | --- | --- | --- |
 | `WIVRN_VIDEO_FEC` | enabled | `0` disables repairs and restores unprotected packetization |
 | `WIVRN_VIDEO_FEC_SCHEME` | `rs` | `rs` or `xor` |
-| `WIVRN_VIDEO_FEC_REPAIRS` | `2` | RS repair packets per 16 sources, integer 1–8; ignored for XOR |
-| `WIVRN_VIDEO_FEC_INTERLEAVE` | `4` | Maximum groups per window, integer 1–4 |
+| `WIVRN_VIDEO_FEC_SOURCES` | `16` | Maximum sources per RS block, integer 1–16; ignored for XOR |
+| `WIVRN_VIDEO_FEC_REPAIRS` | `2` | RS repairs per full block, integer 1–8; ignored for XOR |
+| `WIVRN_VIDEO_FEC_INTERLEAVE` | `4` | Maximum groups per window, integer 1–16 |
 
 Invalid scheme/count/depth values are logged and fall back to their defaults.
 The server logs each stream's selected scheme, full-block sizes, interleave
 depth and enabled state at encoder creation. Client configuration is unnecessary.
 For stronger RS comparisons, set `WIVRN_VIDEO_FEC_REPAIRS=4` or `8`.
-The default stays at 2.
+The default stays at 16+2, interleave depth 4.
+
+Examples (all three variables belong to the server process environment):
+
+| Block | SOURCES | REPAIRS | INTERLEAVE | Full source window | Nominal repair overhead |
+| --- | --- | --- | --- | --- | --- |
+| 4+2 | 4 | 2 | 16 | 64 | 50% |
+| 8+4 | 8 | 4 | 8 | 64 | 50% |
+| 8+2 | 8 | 2 | 8 | 64 | 25% |
+| 16+8 | 16 | 8 | 4 | 64 | 50% |
+
+For example: `WIVRN_VIDEO_FEC_SOURCES=4 WIVRN_VIDEO_FEC_REPAIRS=2
+WIVRN_VIDEO_FEC_INTERLEAVE=16` in the server launch environment. Changing
+block sizes/depth requires only a server update when the client already supports
+revision 4 (the 16+8 build). Existing repair headers describe actual block sizes.
 
 Full 16+2 blocks add 12.5% repair packets; 16+4 adds 25%, and 16+8 adds 50%.
 Headers, padding and short blocks increase byte overhead. Encoder bitrate is unchanged, so repairs
 increase total network traffic. The RS repair count for a short block of K
-sources is `ceil(K * configured_repairs / 16)`, at least one. For example, the
+sources is `ceil(K * configured_repairs / configured_sources)`, at least one. For example, the
 default uses one repair for K=1–8 and two for K=9–16. This is a fixed code rate,
 not adaptive congestion control. Losing more symbols than a block's repair
 budget remains unrecoverable, regardless of the session's average loss rate.
@@ -45,10 +61,20 @@ buffer, stream or frame. No sleep, timer, separate sending thread or wait for
 future output is introduced. Small per-NAL encoder callbacks can therefore
 produce short blocks even when a whole frame is large.
 
-An RS window contains up to 64 sources at the default four-group depth. The
-sender uses `ceil(N/16)` balanced consecutive source ranges, whose sizes differ
+An RS window contains up to `configured_sources * configured_depth` sources,
+64 at the default 16 sources/four groups, and at most 256. The sender uses
+`ceil(N/configured_sources)` balanced consecutive source ranges, whose sizes differ
 by at most one, then emits one symbol per group in round-robin order. Each
 group's repairs follow its own sources and participate in the same schedule.
+Smaller blocks tolerate fewer erasures within one block but allow more groups
+to be interleaved in the same-sized source window. For full windows, both 4+2
+with 16 groups and 8+4 with eight groups tolerate any isolated burst of 32
+emitted datagrams, as does 16+8 with four groups. With a fixed group count,
+smaller blocks can send repairs sooner; increasing group count extends the
+interleave span and can delay contiguous decoder input. Which tradeoff helps
+requires measurement. A partially filled window never waits for future output
+to reach its configured capacity.
+
 For a full 64-source, 16+2 window:
 
 ```
@@ -64,9 +90,9 @@ thirty-two. Short/uneven windows, multiple bursts
 and losses crossing window boundaries have different limits; there is no
 blanket eight-packet guarantee for arbitrary frames.
 
-XOR uses the previous balanced groups of at most eight sources, one repair per
-group, and at most 32 sources per window. Source ordering and group boundaries
-in XOR mode retain the previous scheduler behavior. The new wire header is
+XOR uses balanced groups of at most eight sources and one repair per group.
+Its default four-group depth retains the previous 32-source scheduler behavior;
+explicit depths up to 16 allow up to 128 sources per window. The new wire header is
 shared by both schemes, so XOR comparisons also require the new client.
 
 All repairs for a window are computed **before the first source is sent**:
@@ -133,7 +159,8 @@ random erasures and every contiguous burst up to the budget, including arbitrary
 repair subsets, maximum-rank 8x8 recovery and rejection beyond capacity.
 They compare decoded bytes/metadata, use an independent polynomial GF
 multiplication oracle, and exercise in-place encrypted
-wire round trips. Sender burst schedules cover uneven windows and wire budgets.
+wire round trips. Sender burst schedules cover uneven windows, independently configured block
+sizes/depths, up to 256 sources, and wire budgets.
 The actual accumulator with a mock decoder is tested for every erasure pattern
 within 16+2 and 16+4 budgets, sampled/burst erasures for 16+5/6/7/8,
 reordered/duplicate/conflicting repairs, and capacity-vs-missing-repair

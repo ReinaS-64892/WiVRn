@@ -8,6 +8,7 @@
 #include <bit>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <simdjson.h>
 #include <source_location>
 #include <stdexcept>
@@ -323,13 +324,13 @@ int main()
 	// Real accumulator/decoder integration: exhaustive budgets up to four and
 	// sampled larger budgets, including first/last metadata, arbitrary parity IDs,
 	// repair-first arrival, duplicates and conflicting block metadata.
-	for (uint8_t r: {2, 4, 5, 6, 7, 8})
+	for (const auto & [count, r]: std::vector<std::pair<uint8_t, uint8_t>>{{4, 2}, {8, 2}, {8, 4}, {16, 2}, {16, 4}, {16, 5}, {16, 6}, {16, 7}, {16, 8}})
 	{
 		std::vector<wivrn::to_headset::video_stream_data_shard> originals;
-		for (uint16_t i = 0; i < 16; ++i)
-			originals.push_back(source(800, i, 16));
+		for (uint16_t i = 0; i < count; ++i)
+			originals.push_back(source(800, i, count));
 		auto repairs = wivrn::encode_video_rs(originals, r);
-		for (unsigned mask: video_fec_test::erasure_masks(16, r, r <= 4))
+		for (unsigned mask: video_fec_test::erasure_masks(count, r, r <= 4))
 		{
 			for (bool repair_first: {false, true})
 			{
@@ -337,7 +338,7 @@ int main()
 				wivrn::shard_accumulator rs_receiver(device, physical, instance, 0, description, {}, 0);
 				auto send_repairs = [&] {
 					for (int i = r - 1; i >= 0; --i)
-						if (!(mask & (1u << (16 + i))))
+						if (!(mask & (1u << (count + i))))
 						{
 							rs_receiver.push_repair(wivrn::to_headset::video_stream_repair_shard(repairs[i]));
 							rs_receiver.push_repair(wivrn::to_headset::video_stream_repair_shard(repairs[i]));
@@ -348,19 +349,56 @@ int main()
 				};
 				if (repair_first)
 					send_repairs();
-				for (int i = 15; i >= 0; --i)
+				for (int i = count - 1; i >= 0; --i)
 					if (!(mask & (1u << i)))
-						rs_receiver.push_shard(source(800, i, 16));
+						rs_receiver.push_shard(source(800, i, count));
 				if (!repair_first)
 					send_repairs();
 				require(recording->completed.size() == 1);
-				require(recording->completed[0] == std::vector<uint8_t>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}));
+				std::vector<uint8_t> expected(count);
+				std::iota(expected.begin(), expected.end(), 0);
+				require(recording->completed[0] == expected);
 				const auto stats = rs_receiver.take_statistics();
 				require(stats.completed_frames == 1 && stats.incomplete_frames == 0);
 				if (!repair_first)
-					require(stats.recovered_packets == unsigned(std::popcount(mask & 0xffff)));
+					require(stats.recovered_packets == unsigned(std::popcount(mask & ((1u << count) - 1))));
 			}
 		}
+	}
+	// Full 64-source windows with smaller blocks and deeper interleaving must
+	// reconstruct the frame in order through the actual decoder submission path.
+	struct interleave_configuration
+	{
+		uint8_t sources, repairs, depth;
+	};
+	for (auto config: {interleave_configuration{4, 2, 16}, {8, 4, 8}, {8, 2, 8}})
+	{
+		std::vector<wivrn::to_headset::video_stream_data_shard> originals;
+		for (uint16_t i = 0; i < 64; ++i)
+			originals.push_back(source(850, i, 64));
+		std::vector<wivrn::to_headset::packets> wire;
+		auto emit = [&](auto packet) { wire.emplace_back(std::move(packet)); };
+		wivrn::send_interleaved_video(originals, emit, emit, config.repairs, config.sources, config.depth);
+		for (size_t burst = 1; burst <= size_t(config.repairs) * config.depth; ++burst)
+			for (size_t first = 0; first + burst <= wire.size(); ++first)
+			{
+				recording = std::make_shared<recording_decoder>();
+				wivrn::shard_accumulator rs_receiver(device, physical, instance, 0, description, {}, 0);
+				for (size_t i = 0; i < wire.size(); ++i)
+				{
+					if (i >= first && i < first + burst)
+						continue;
+					if (auto packet = std::get_if<wivrn::to_headset::video_stream_data_shard>(&wire[i]))
+						rs_receiver.push_shard(wivrn::to_headset::video_stream_data_shard(*packet));
+					else
+						rs_receiver.push_repair(wivrn::to_headset::video_stream_repair_shard(std::get<wivrn::to_headset::video_stream_repair_shard>(wire[i])));
+				}
+				require(recording->completed.size() == 1);
+				std::vector<uint8_t> expected(64);
+				std::iota(expected.begin(), expected.end(), 0);
+				require(recording->completed[0] == expected);
+				require(rs_receiver.take_statistics().incomplete_frames == 0);
+			}
 	}
 	// Distinguish a code-capacity failure from missing repair packets in logs.
 	require(recorder.start(std::filesystem::temp_directory_path() / ("wivrn-fec-receiver-" + std::to_string(getpid()))));
