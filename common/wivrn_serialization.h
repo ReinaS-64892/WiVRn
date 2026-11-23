@@ -250,7 +250,8 @@ public:
 	{
 		check_remaining_size(size);
 
-		memcpy(data, buffer.data(), size);
+		if (size)
+			memcpy(data, buffer.data(), size);
 		buffer = buffer.subspan(size);
 	}
 
